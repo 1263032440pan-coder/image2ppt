@@ -150,7 +150,9 @@ def _foreground_mask(cleaned: np.ndarray, dilate_size: int) -> np.ndarray:
 
 
 def detect_components(cleaned: np.ndarray, min_area: int, dilate_size: int,
-                      foreground_mask: np.ndarray | None = None) -> list[tuple]:
+                      foreground_mask: np.ndarray | None = None,
+                      *, return_labels: bool = False
+                      ) -> list[tuple] | tuple[list[tuple], np.ndarray, list[int]]:
     """Detect ALL connected components. Returns components above noise floor.
 
     Even a whole-image-sized component is returned (not filtered) so that
@@ -165,13 +167,17 @@ def detect_components(cleaned: np.ndarray, min_area: int, dilate_size: int,
     """
     mask = (foreground_mask if foreground_mask is not None
             else _foreground_mask(cleaned, dilate_size))
-    n, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     out = []
+    label_ids = []
     for i in range(1, n):
         x, y, ww, hh, area = stats[i]
         if area < min_area:
             continue
         out.append((int(x), int(y), int(x + ww), int(y + hh), int(area)))
+        label_ids.append(i)
+    if return_labels:
+        return out, labels, label_ids
     return out
 
 

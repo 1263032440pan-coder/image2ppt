@@ -129,14 +129,15 @@ class InventoryBuilder:
             and not is_in_logo_zone(item, logo_bands)
         ]
 
-        # Compute one shared mask for connected components and the later
-        # recursive split pass. This keeps the split cue consistent with
-        # detection and avoids the old dark-slide gray-threshold failure.
+        # Compute one shared foreground mask. The connected-component label
+        # map below lets each split pass use only the pixels belonging to
+        # that component, avoiding projection contamination from neighbors.
         self.component_mask = self._foreground_mask(
             self.cleaned, args.dilate)
-        self.components = self._detect_components(
+        (self.components, self.component_label_map,
+         self.component_label_ids) = self._detect_components(
             self.cleaned, args.min_area, args.dilate,
-            foreground_mask=self.component_mask)
+            foreground_mask=self.component_mask, return_labels=True)
         self.component_split_records: list[dict] = []
 
         self.inventory: list[dict] = []
@@ -225,6 +226,60 @@ class InventoryBuilder:
             local = self.cleaned[sy1:sy2, sx1:sx2]
             inpaint_region_inplace(local, mask_in_crop, scale=self.scale,
                                    fill_color=fill)
+
+    def _split_component(self, crop: np.ndarray,
+                         component_mask: np.ndarray) -> tuple[list[tuple], str]:
+        """Split a component, using morphology to expose thin-bridge joins.
+
+        The ordinary projection pass works well when components are already
+        separated by whitespace. Large slide regions often become one
+        connected component because thin card borders and rules join several
+        otherwise distinct objects. An opening on a *copy* of that component
+        mask suppresses those narrow bridges for split-cue generation; emitted
+        assets still come from the untouched source/cleaned images. Small
+        fragments are filtered so this does not turn every line-art stroke
+        into its own slide element.
+        """
+        splits = self._conservative_split(
+            crop, min_gap=self.args.split_gap,
+            foreground_mask=component_mask)
+        method = "projection"
+        page_area = max(1, self.img_w * self.img_h)
+        if crop.shape[0] * crop.shape[1] < page_area * 0.08:
+            return splits, method
+
+        kernel_size = max(3, s_length(7, self.scale))
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        opened = cv2.morphologyEx(
+            component_mask, cv2.MORPH_OPEN,
+            cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (kernel_size, kernel_size)))
+        if int(opened.sum()) < s_area(400, self.scale) * 255:
+            return splits, method
+
+        candidates = self._conservative_split(
+            crop, min_gap=self.args.split_gap, foreground_mask=opened)
+        min_side = s_length(20, self.scale)
+        min_area = s_area(450, self.scale)
+        meaningful = [
+            (x1, y1, x2, y2) for x1, y1, x2, y2 in candidates
+            if min(x2 - x1, y2 - y1) >= min_side
+            and (x2 - x1) * (y2 - y1) >= min_area
+        ]
+        if len(meaningful) <= max(1, len(splits)):
+            return splits, method
+
+        # Opening trims antialiased borders. Add a small safety margin while
+        # keeping every split inside its parent component crop.
+        pad = s_length(3, self.scale)
+        h, w = component_mask.shape[:2]
+        padded = [
+            (max(0, x1 - pad), max(0, y1 - pad),
+             min(w, x2 + pad), min(h, y2 + pad))
+            for x1, y1, x2, y2 in meaningful
+        ]
+        return padded, "morph_open+projection"
 
     def _scan_subicons_inplace(self, sx1: int, sy1: int,
                                sx2: int, sy2: int) -> None:
@@ -360,7 +415,9 @@ class InventoryBuilder:
         for x1, y1, x2, y2, outline_mask in self._detect_outline_rects(
                 self.cleaned):
             self._append_outline_record(x1, y1, x2, y2, outline_mask)
-        for x1, y1, x2, y2, _area in self.components:
+        for component, label_id in zip(
+                self.components, self.component_label_ids):
+            x1, y1, x2, y2, _area = component
             crop = self.cleaned[y1:y2, x1:x2]
             outline_mask = self._detect_outline_mask(
                 self.cleaned, x1, y1, x2, y2)
@@ -369,13 +426,17 @@ class InventoryBuilder:
                 if not (x2 - x1 >= self.img_w * 0.95
                         and y2 - y1 >= self.img_h * 0.95):
                     self._append_foreground_record(x1, y1, x2, y2)
-            local_mask = self.component_mask[y1:y2, x1:x2]
-            sub = self._conservative_split(
-                crop, min_gap=self.args.split_gap,
-                foreground_mask=local_mask)
+            # Restrict the split projection to this connected component.
+            # A shared-mask crop also includes unrelated components that
+            # happen to lie inside the component's bounding box; those pixels
+            # can fill otherwise-empty projection valleys and suppress splits.
+            local_labels = self.component_label_map[y1:y2, x1:x2]
+            local_mask = (local_labels == label_id).astype(np.uint8) * 255
+            sub, split_method = self._split_component(crop, local_mask)
             self.component_split_records.append({
                 "parent_bbox": [int(x1), int(y1), int(x2), int(y2)],
                 "split_count": len(sub),
+                "split_method": split_method,
                 "split_bboxes": [
                     [int(x1 + sx1), int(y1 + sy1),
                      int(x1 + sx2), int(y1 + sy2)]
@@ -776,6 +837,7 @@ class InventoryBuilder:
                 "bbox_page_fraction": round(
                     ((x2 - x1) * (y2 - y1)) / page_area, 5),
                 "split_count": int(record.get("split_count", 1)),
+                "split_method": record.get("split_method", "projection"),
                 "split_bboxes": record.get("split_bboxes", [[x1, y1, x2, y2]]),
             })
         role_counts: dict[str, int] = {}
@@ -787,7 +849,7 @@ class InventoryBuilder:
         report = {
             "source": str(Path(self.args.source).resolve()),
             "image_size": [self.img_w, self.img_h],
-            "method": "OpenCV canvas/Lab/local-contrast/Canny + connected components + projection valleys",
+            "method": "OpenCV canvas/Lab/local-contrast/Canny + component-specific masks + morphology opening + projection valleys",
             "counts": {
                 "connected_components": len(self.components),
                 "inventory_images": sum(
