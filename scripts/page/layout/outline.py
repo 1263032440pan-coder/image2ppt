@@ -82,6 +82,71 @@ def _sample_card_fill_color(
     return _bgr_to_hex(med)
 
 
+def _simple_internal_shape(
+    source: np.ndarray,
+    bbox: tuple[int, int, int, int],
+) -> dict | None:
+    """Describe a flat internal badge/panel as a native PPT shape.
+
+    Internal detections can also contain multicolor illustrations. Convert
+    only a dominant, nearly uniform fill and a clear ellipse/rectangle;
+    keep everything else as an image asset.
+    """
+    x1, y1, x2, y2 = (int(v) for v in bbox)
+    crop = source[max(0, y1):min(source.shape[0], y2),
+                  max(0, x1):min(source.shape[1], x2)]
+    if crop.size == 0 or min(crop.shape[:2]) < 8:
+        return None
+    h, w = crop.shape[:2]
+    cy1, cy2 = int(0.12 * h), max(int(0.88 * h), int(0.12 * h) + 1)
+    cx1, cx2 = int(0.12 * w), max(int(0.88 * w), int(0.12 * w) + 1)
+    sample = crop[cy1:cy2, cx1:cx2]
+    quant = (sample.reshape(-1, 3).astype(np.uint16) // 16).astype(np.uint8)
+    colors, counts = np.unique(quant, axis=0, return_counts=True)
+    color_bin = colors[int(np.argmax(counts))].astype(np.int16)
+    sample_flat = sample.reshape(-1, 3).astype(np.int16)
+    sample_delta = np.abs(sample_flat - (color_bin * 16 + 8)).max(axis=1)
+    support = float((sample_delta <= 28).sum()) / max(1, len(sample_delta))
+    # If icons, labels or markings sit on a filled carrier, leave it as an
+    # image asset so those details survive. Native conversion is reserved
+    # for virtually flat fills.
+    if support < 0.92:
+        return None
+
+    fill_bgr = np.median(sample_flat[sample_delta <= 28], axis=0).astype(np.uint8)
+    delta = np.abs(crop.astype(np.int16) - fill_bgr.astype(np.int16)).max(axis=2)
+    mask = (delta <= 32).astype(np.uint8) * 255
+    k = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    contour = max(contours, key=cv2.contourArea)
+    bx, by, bw, bh = cv2.boundingRect(contour)
+    if bw < 0.72 * w or bh < 0.72 * h:
+        return None
+    area_ratio = cv2.contourArea(contour) / float(max(1, bw * bh))
+    if area_ratio < 0.62:
+        return None
+    perimeter = cv2.arcLength(contour, True)
+    approx = cv2.approxPolyDP(contour, max(1.0, 0.025 * perimeter), True)
+    aspect = bw / float(max(1, bh))
+    shape = None
+    if (0.82 <= aspect <= 1.22 and 0.68 <= area_ratio <= 0.88
+            and len(approx) >= 6):
+        shape = "oval"
+    elif area_ratio >= 0.84 and len(approx) <= 6:
+        shape = "rect"
+    if shape is None:
+        return None
+    return {
+        "shape": shape,
+        "fill": _bgr_to_hex(fill_bgr.astype(int)),
+        "line": None,
+    }
+
+
 def _outline_should_be_native_shape(
         bbox: tuple[int, int, int, int]) -> bool:
     """Use native round-rect only for card-like outlines.

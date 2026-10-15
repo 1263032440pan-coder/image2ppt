@@ -253,18 +253,12 @@ def detect_internal_shapes(
         if len(close) < max(8, int(0.15 * len(inner_fg))):
             close = inner_fg
         bg_color = np.median(close, axis=0).astype(np.float32)
-        # Bail when the parent isn't a uniformly-filled card. The
-        # internal-shape concept assumes one dominant fill that we can
-        # paint over; when the bbox covers a composite (multiple disjoint
-        # cards + connector lines + a tinted background), the modal
-        # cluster only represents 30-40 % of the foreground and the rest
-        # of the foreground gets flagged as "different from bg" — turning
-        # every card inside the composite into a fillable shape. We
-        # require the modal cluster to cover >=60 % of the foreground so
-        # only true single-card parents go through the internal-shape
-        # fill path.
+        # A single-card parent has a reliable modal fill. Composite parents
+        # often have several panels and no 60% color winner; use the local
+        # crop-corner color as the baseline there and let the per-candidate
+        # ring/inpaint checks decide whether each child can be separated.
         if len(close) < 0.60 * len(inner_fg):
-            return [], []
+            bg_color = slide_bg.astype(np.float32)
 
     # "Different from bg" — diff >= 8 per channel. Lower than the main
     # component threshold (S>12 / gray<245) so subtle inset rectangles

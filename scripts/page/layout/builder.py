@@ -38,6 +38,7 @@ from layout.icon_alpha import (  # noqa: E402
 )
 from layout.lists import strip_leading_list_markers  # noqa: E402
 from layout.outline import (  # noqa: E402
+    _simple_internal_shape,
     _outline_should_be_native_shape,
     _outline_should_keep_full_crop,
     _sample_card_fill_color,
@@ -542,6 +543,17 @@ class LayoutBuilder:
                 "line_width": 0.9, "radius": 0.08,
             })
             return
+        if role == "internal":
+            native = _simple_internal_shape(
+                self.source, (int(x1), int(y1), int(x2), int(y2)))
+            if native is not None:
+                self.shape_elements.append({
+                    "type": "shape", "name": el["id"],
+                    "shape": native["shape"],
+                    "box": [int(x1), int(y1), int(x2 - x1), int(y2 - y1)],
+                    "fill": native["fill"], "line": native["line"],
+                })
+                return
         text_erased_crop = (
             src_img is self.cleaned
             or (self.text_only is not None and src_img is self.text_only)

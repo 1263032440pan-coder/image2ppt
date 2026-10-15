@@ -101,16 +101,56 @@ def _foreground_mask(cleaned: np.ndarray, dilate_size: int) -> np.ndarray:
     bg_pixel = bg.astype(np.uint8).reshape(1, 1, 3)
     bg_hsv = cv2.cvtColor(bg_pixel, cv2.COLOR_BGR2HSV)[0, 0]
     sat_delta = np.abs(hsv[:, :, 1].astype(np.int16) - int(bg_hsv[1]))
-    mask = ((diff_bg >= 8) | ((diff_bg >= 5) & (sat_delta > 18))).astype(np.uint8) * 255
+    # Lab distance catches subtle hue changes that are not large in any
+    # single BGR channel. Keep the old channel/saturation rules as well,
+    # since they are more sensitive to very pale anti-aliased strokes.
+    lab = cv2.cvtColor(cleaned, cv2.COLOR_BGR2LAB).astype(np.int32)
+    bg_lab = cv2.cvtColor(bg.astype(np.uint8).reshape(1, 1, 3),
+                          cv2.COLOR_BGR2LAB)[0, 0].astype(np.int32)
+    lab_delta = np.sqrt(np.sum((lab - bg_lab[None, None, :]) ** 2,
+                               axis=2))
+    global_mask = (
+        (diff_bg >= 8)
+        | ((diff_bg >= 5) & (sat_delta > 18))
+        | (lab_delta >= 7.0)
+    )
+    # Very pale, low-chroma fills are common slide-wide panel backdrops.
+    # Treating every such pixel as foreground connects neighboring cards
+    # into one page-sized component. Their boundaries are recovered below
+    # by the multi-channel edge pass, while darker/saturated fills remain
+    # solid foreground regions.
+    pale_backdrop = (gray >= 235) & (hsv[:, :, 1] < 45) & (diff_bg <= 42)
+    global_mask &= ~pale_backdrop
+
+    # A local-background residual finds low-contrast cards and decorations
+    # on gradients or tinted panels. The canvas-relative mask remains the
+    # primary cue so broad background texture does not become foreground.
+    scale = max(0.5, cleaned.shape[0] / 720.0)
+    local_kernel = max(15, int(round(41 * scale)))
+    if local_kernel % 2 == 0:
+        local_kernel += 1
+    local_bg = cv2.GaussianBlur(cleaned, (local_kernel, local_kernel), 0)
+    local_delta = np.abs(cleaned.astype(np.int16)
+                         - local_bg.astype(np.int16)).max(axis=2)
+    local_mask = (local_delta >= 13) & ~pale_backdrop & (
+        (hsv[:, :, 1] > 18) | (gray < 238) | (diff_bg >= 4)
+    )
+    mask = (global_mask | local_mask).astype(np.uint8) * 255
     blurred = cv2.GaussianBlur(gray, (3, 3), 0)
     edges = cv2.Canny(blurred, 30, 90)
+    lab8 = cv2.cvtColor(cleaned, cv2.COLOR_BGR2LAB)
+    # Lightly colored boundaries can have almost identical luminance; low
+    # threshold Canny passes on Lab chroma preserve those card outlines.
+    edges = cv2.bitwise_or(edges, cv2.Canny(lab8[:, :, 1], 10, 32))
+    edges = cv2.bitwise_or(edges, cv2.Canny(lab8[:, :, 2], 10, 32))
     edges = cv2.dilate(edges, np.ones((2, 2), np.uint8), iterations=1)
     mask = cv2.bitwise_or(mask, edges)
     kernel = np.ones((dilate_size, dilate_size), np.uint8)
     return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
 
-def detect_components(cleaned: np.ndarray, min_area: int, dilate_size: int) -> list[tuple]:
+def detect_components(cleaned: np.ndarray, min_area: int, dilate_size: int,
+                      foreground_mask: np.ndarray | None = None) -> list[tuple]:
     """Detect ALL connected components. Returns components above noise floor.
 
     Even a whole-image-sized component is returned (not filtered) so that
@@ -123,7 +163,8 @@ def detect_components(cleaned: np.ndarray, min_area: int, dilate_size: int) -> l
     - Subtle line art (white-bg sketches with light strokes)
     - Saturated colored regions (bars, banners, icons)
     """
-    mask = _foreground_mask(cleaned, dilate_size)
+    mask = (foreground_mask if foreground_mask is not None
+            else _foreground_mask(cleaned, dilate_size))
     n, _, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
     out = []
     for i in range(1, n):
@@ -160,7 +201,13 @@ def _split_axis(fg: np.ndarray, axis: int, min_gap: int) -> list[tuple]:
     (start, end) ranges along the OPPOSITE axis covering each foreground
     block."""
     H, W = fg.shape
-    has_fg = fg.sum(axis=axis) > 0
+    projection = fg.sum(axis=axis)
+    orthogonal_size = H if axis == 0 else W
+    # Permit a thin rule or a few anti-aliased pixels through a whitespace
+    # valley. This separates panels joined by a 1–2 px connector while
+    # keeping ordinary text strokes active across the cut.
+    valley_occupancy = max(2, int(round(orthogonal_size * 0.012)))
+    has_fg = projection > valley_occupancy
     gaps = _find_gaps(has_fg, min_gap)
     if not gaps:
         return []
@@ -299,7 +346,8 @@ def detect_outline_rects(cleaned: np.ndarray) -> list[tuple[int, int, int, int, 
     return out
 
 
-def conservative_split(crop: np.ndarray, min_gap: int = 12) -> list[tuple]:
+def conservative_split(crop: np.ndarray, min_gap: int = 12,
+                       foreground_mask: np.ndarray | None = None) -> list[tuple]:
     """Split via white-space gaps in BOTH horizontal and vertical directions.
     Tries vertical-strip split first (left-right), then for each strip tries
     horizontal split (top-bottom). Any clean gap of `min_gap` px or more is
@@ -310,9 +358,21 @@ def conservative_split(crop: np.ndarray, min_gap: int = 12) -> list[tuple]:
     Returns [(x1,y1,x2,y2), ...] relative to crop. Single-element list when
     no clean split is possible."""
     H, W = crop.shape[:2]
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-    fg = ((gray < 225) | (hsv[:, :, 1] > 30)).astype(np.uint8)
+    # Use a shorter whitespace gap for compact cards and nested panels.
+    # A fixed 12 px (scaled) gap misses the 8–12 px gutters common in
+    # repeated rows, while the proportional cap keeps large regions using
+    # the caller's conservative threshold.
+    min_gap = min(min_gap, max(6, int(round(min(H, W) * 0.035))))
+    if foreground_mask is not None and foreground_mask.shape[:2] == (H, W):
+        fg = (foreground_mask > 0).astype(np.uint8)
+    else:
+        # Standalone fallback: compare with the crop's corner-estimated
+        # canvas color instead of treating every dark-background pixel as
+        # foreground (the previous gray<225 rule did exactly that).
+        bg = _estimate_background_bgr(crop).astype(np.int16)
+        delta = np.abs(crop.astype(np.int16) - bg).max(axis=2)
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        fg = ((delta >= 8) | ((delta >= 5) & (hsv[:, :, 1] > 18))).astype(np.uint8)
 
     def fit_bbox(strip):
         rs = np.where(strip.sum(axis=1) > 0)[0]

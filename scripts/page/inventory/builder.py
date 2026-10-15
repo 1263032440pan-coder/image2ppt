@@ -129,8 +129,15 @@ class InventoryBuilder:
             and not is_in_logo_zone(item, logo_bands)
         ]
 
+        # Compute one shared mask for connected components and the later
+        # recursive split pass. This keeps the split cue consistent with
+        # detection and avoids the old dark-slide gray-threshold failure.
+        self.component_mask = self._foreground_mask(
+            self.cleaned, args.dilate)
         self.components = self._detect_components(
-            self.cleaned, args.min_area, args.dilate)
+            self.cleaned, args.min_area, args.dilate,
+            foreground_mask=self.component_mask)
+        self.component_split_records: list[dict] = []
 
         self.inventory: list[dict] = []
         self.visual_idx = 0
@@ -362,7 +369,19 @@ class InventoryBuilder:
                 if not (x2 - x1 >= self.img_w * 0.95
                         and y2 - y1 >= self.img_h * 0.95):
                     self._append_foreground_record(x1, y1, x2, y2)
-            sub = self._conservative_split(crop, min_gap=self.args.split_gap)
+            local_mask = self.component_mask[y1:y2, x1:x2]
+            sub = self._conservative_split(
+                crop, min_gap=self.args.split_gap,
+                foreground_mask=local_mask)
+            self.component_split_records.append({
+                "parent_bbox": [int(x1), int(y1), int(x2), int(y2)],
+                "split_count": len(sub),
+                "split_bboxes": [
+                    [int(x1 + sx1), int(y1 + sy1),
+                     int(x1 + sx2), int(y1 + sy2)]
+                    for sx1, sy1, sx2, sy2 in sub
+                ],
+            })
             if len(sub) == 1:
                 cw, ch = x2 - x1, y2 - y1
                 if cw >= self.img_w * 0.95 and ch >= self.img_h * 0.95:
@@ -707,7 +726,7 @@ class InventoryBuilder:
 
         # _cv2.png — shows the raw foreground mask + every component bbox
         # before filtering. Useful for "missing card border" diagnosis.
-        cv2_mask = self._foreground_mask(self.cleaned, self.args.dilate)
+        cv2_mask = self.component_mask
         vis2 = self.source.copy()
         mask_red = np.zeros_like(vis2)
         mask_red[..., 2] = cv2_mask
@@ -726,6 +745,68 @@ class InventoryBuilder:
             (8, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
             (255, 255, 255), 1, cv2.LINE_AA)
         cv2.imwrite(str(debug_dir / f"{stem}_cv2.png"), vis2)
+
+        # Separate the original connected components from the pieces
+        # produced by projection splitting. This makes the common failure
+        # case (one large merged parent that stayed unsplit) visible without
+        # requiring a manual correction UI.
+        split_vis = self.source.copy()
+        for idx, record in enumerate(self.component_split_records):
+            x1, y1, x2, y2 = record["parent_bbox"]
+            cv2.rectangle(split_vis, (x1, y1), (x2, y2), (0, 215, 255), 1)
+            cv2.putText(split_vis, str(idx), (x1 + 2, max(12, y1 + 13)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38,
+                        (0, 215, 255), 1, cv2.LINE_AA)
+            for sx1, sy1, sx2, sy2 in record["split_bboxes"]:
+                cv2.rectangle(split_vis, (sx1, sy1), (sx2, sy2),
+                              (255, 180, 0), 1)
+        cv2.imwrite(str(debug_dir / f"{stem}_splits.png"), split_vis)
+
+        page_area = max(1, self.img_w * self.img_h)
+        split_by_parent = {
+            tuple(record["parent_bbox"]): record
+            for record in self.component_split_records
+        }
+        component_report = []
+        for x1, y1, x2, y2, area in self.components:
+            record = split_by_parent.get((x1, y1, x2, y2), {})
+            component_report.append({
+                "bbox": [x1, y1, x2, y2],
+                "foreground_pixels": int(area),
+                "bbox_page_fraction": round(
+                    ((x2 - x1) * (y2 - y1)) / page_area, 5),
+                "split_count": int(record.get("split_count", 1)),
+                "split_bboxes": record.get("split_bboxes", [[x1, y1, x2, y2]]),
+            })
+        role_counts: dict[str, int] = {}
+        for el in self.inventory:
+            if el.get("type") != "image":
+                continue
+            role = str(el.get("role") or "visual")
+            role_counts[role] = role_counts.get(role, 0) + 1
+        report = {
+            "source": str(Path(self.args.source).resolve()),
+            "image_size": [self.img_w, self.img_h],
+            "method": "OpenCV canvas/Lab/local-contrast/Canny + connected components + projection valleys",
+            "counts": {
+                "connected_components": len(self.components),
+                "inventory_images": sum(
+                    1 for el in self.inventory if el.get("type") == "image"),
+                "inventory_text": sum(
+                    1 for el in self.inventory if el.get("type") == "text"),
+                "images_by_role": role_counts,
+            },
+            "large_unsplit_components": [
+                component for component in component_report
+                if component["bbox_page_fraction"] >= 0.08
+                and component["split_count"] == 1
+            ],
+            "components": component_report,
+        }
+        (debug_dir / f"{stem}_segmentation.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2),
+            encoding="utf-8")
+        cv2.imwrite(str(debug_dir / f"{stem}_foreground_mask.png"), cv2_mask)
 
     def build_and_write(self) -> None:
         self._emit_text_entries()
