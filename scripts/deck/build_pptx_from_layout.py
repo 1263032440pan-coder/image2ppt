@@ -11,7 +11,8 @@ from typing import Any
 
 SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
 DECK_DIR = Path(__file__).resolve().parent
-for _p in (DECK_DIR, SCRIPTS_ROOT):
+PAGE_DIR = SCRIPTS_ROOT / "page"
+for _p in (DECK_DIR, PAGE_DIR, SCRIPTS_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
@@ -31,6 +32,10 @@ except ModuleNotFoundError as exc:
     ) from exc
 
 from text_safety import ppt_safe_text  # noqa: E402
+from layout.render_font import (  # noqa: E402
+    default_ppt_font as _system_default_ppt_font,
+    resolve_ppt_font,
+)
 
 import text_finalizers  # noqa: E402
 # Re-export so existing `from build_pptx_from_layout import apply_*` paths
@@ -43,7 +48,7 @@ from text_finalizers import (  # noqa: E402, F401
 
 
 def default_ppt_font() -> str:
-    return "Microsoft YaHei"
+    return _system_default_ppt_font()
 
 
 DEFAULT_FONT = default_ppt_font()
@@ -184,8 +189,18 @@ class Builder:
         self.offset_y_in = (self.slide_h_in - px_h * self.scale_in_per_px) / 2.0
 
     def set_font(self, run, spec: dict[str, Any]) -> None:
-        font = spec.get("font") or spec.get("font_name") or DEFAULT_FONT
+        requested_font = spec.get("font") or spec.get("font_name") or DEFAULT_FONT
+        font = resolve_ppt_font(requested_font, text=str(run.text or ""))
         run.font.name = font
+        # python-pptx's Font.name writes only the Latin typeface. Office uses
+        # the separate East Asian typeface for Chinese/Japanese/Korean glyphs,
+        # so leave a:ea unset and it may silently substitute a different font.
+        r_pr = run._r.get_or_add_rPr()
+        ea = r_pr.find(qn("a:ea"))
+        if ea is None:
+            ea = OxmlElement("a:ea")
+            r_pr.append(ea)
+        ea.set("typeface", font)
         size = int(round(float(spec.get("size", spec.get("font_size", 18)))))
         run.font.size = Pt(max(1, size))
         run.font.bold = bool(spec.get("bold", False))
@@ -268,7 +283,8 @@ class Builder:
         p_pr.set("marL", str(int(self.w(body_indent_px))))
         p_pr.set("indent", str(int(self.w(marker_indent_px - body_indent_px))))
 
-        font = el.get("font") or el.get("font_name") or DEFAULT_FONT
+        requested_font = el.get("font") or el.get("font_name") or DEFAULT_FONT
+        font = resolve_ppt_font(requested_font, text="•")
         bu_font = OxmlElement("a:buFont")
         bu_font.set("typeface", font)
         p_pr.append(bu_font)

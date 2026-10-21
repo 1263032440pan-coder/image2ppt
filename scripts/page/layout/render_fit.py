@@ -10,7 +10,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from layout.render_font import _font_candidates, _render_text_metrics
+from layout.render_font import (
+    _font_candidates,
+    _render_text_metrics,
+    font_families_match,
+    has_cjk_text,
+    is_cjk_font_family,
+)
 from layout.render_ink import _mask_shape_error, _target_text_metrics
 from layout.text_sizing import _FONT_LADDER, _is_punct_run
 from layout.text_units import _estimated_text_width_px
@@ -60,12 +66,19 @@ def fit_text_render(
     target = _target_text_metrics(source, bbox)
     if target is None or target["ink_h"] < 3 or target["ink_w"] < 3:
         return None
-    fonts = _font_candidates()
+    cjk_text = has_cjk_text(text) or is_cjk_font_family(initial_font)
+    # Punctuation-only detections inherit their classifier-selected CJK
+    # family; otherwise a lone Chinese punctuation mark would be measured
+    # against a Latin-only candidate list.
+    fonts = _font_candidates(
+        initial_font,
+        cjk=True if cjk_text else False,
+    )
     if not fonts:
         return None
     if _is_punct_run(text):
         fonts = [f for f in fonts
-                 if f["ppt_name"] == initial_font] or fonts[:1]
+                 if font_families_match(initial_font, f["ppt_name"])] or fonts[:1]
 
     best: dict | None = None
     bold_options = [bool(initial_bold)]
@@ -75,7 +88,7 @@ def fit_text_render(
     for font_idx, font in enumerate(fonts):
         font_path = font["path"]
         font_penalty = float(font.get("penalty", 0.0))
-        if font["ppt_name"] != initial_font:
+        if not font_families_match(font["ppt_name"], initial_font):
             font_penalty += 0.02 + font_idx * 0.005
         for bold in bold_options:
             size_candidates = _binary_size_candidates(

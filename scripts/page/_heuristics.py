@@ -392,6 +392,17 @@ def is_likely_icon(item: dict, all_items: list[dict],
     # Low confidence short text
     if len(text) <= 2 and conf < 0.6:
         return True, "low_conf_short_text"
+    # A small OCR crop with weak confidence can be a real label, icon detail,
+    # or damaged glyph. Preserve its source pixels and route it through the
+    # existing review packet rather than erasing pixels and inserting a
+    # speculative editable transcription.
+    if (
+        conf < 0.55
+        and len(text) <= 6
+        and max(cw, ch) <= s_length(72, scale)
+        and cw * ch <= s_area(3600, scale)
+    ):
+        return True, "low_confidence_small_text"
     # Isolated single char
     if len(text) == 1:
         cy = (item["y1"] + item["y2"]) / 2

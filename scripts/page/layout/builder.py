@@ -22,7 +22,6 @@ for _p in (PAGE_DIR, SCRIPTS_ROOT):
 
 from shared.bg_sample import estimate_canvas_hex  # noqa: E402
 from shared.geometry import connector_on_container_border  # noqa: E402
-from icon import inpaint_region_inplace  # noqa: E402
 from text_safety import ppt_safe_text  # noqa: E402
 
 # Direct sibling imports — no longer routed through the inventory_to_layout
@@ -47,17 +46,7 @@ from layout.outline import (  # noqa: E402
 )
 from layout.text_emit import _emit_text_element_record  # noqa: E402
 from layout.zorder import topo_sort_by_containment  # noqa: E402
-
-
-_CHILD_ROLES = {
-    "container",
-    "internal",
-    "subicon",
-    "badge_subicon",
-    "connector",
-    "line_subicon",
-    "preserve_visual_icon",
-}
+from layout.extraction import fit_background, validate_child_asset  # noqa: E402
 
 
 class LayoutBuilder:
@@ -108,6 +97,8 @@ class LayoutBuilder:
         self.image_elements: list[dict] = []
         self.shape_elements: list[dict] = []
         self.text_elements: list[dict] = []
+        self.composite_export_audit: list[dict] = []
+        self.extraction_audit: list[dict] = []
         self.text_boxes = [
             tuple(int(v) for v in el["bbox"])
             for el in self.inventory
@@ -126,105 +117,6 @@ class LayoutBuilder:
     # Child / parent crop helpers (formerly nested closures in _run)
     # ------------------------------------------------------------------
 
-    def _child_source_image(self, child: dict) -> np.ndarray:
-        role = child.get("role")
-        if role in _ICON_PAD_ROLES or role == "preserve_visual_icon":
-            return self.text_only if self.text_only is not None else self.cleaned
-        if child.get("source") == "source":
-            return self.text_only if self.text_only is not None else self.source
-        if child.get("source") == "original":
-            return self.source
-        return self.text_only if self.text_only is not None else self.cleaned
-
-    def _child_inpaint_mask(self, child: dict):
-        cx1, cy1, cx2, cy2 = (int(v) for v in child["bbox"])
-        if cx2 <= cx1 or cy2 <= cy1:
-            return None
-        src = self._child_source_image(child)
-        h_src, w_src = src.shape[:2]
-        cx1 = max(0, min(w_src, cx1)); cx2 = max(0, min(w_src, cx2))
-        cy1 = max(0, min(h_src, cy1)); cy2 = max(0, min(h_src, cy2))
-        if cx2 <= cx1 or cy2 <= cy1:
-            return None
-        crop_child = src[cy1:cy2, cx1:cx2]
-        role = child.get("role")
-        mask_path = child.get("mask_path")
-        if mask_path and Path(mask_path).exists():
-            m = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-            if m is not None and m.shape[:2] == src.shape[:2]:
-                mask = m[cy1:cy2, cx1:cx2] > 16
-                if int(mask.sum()) >= 4:
-                    return (cx1, cy1, cx2, cy2), mask
-        if role == "container":
-            # A nested card/panel is itself an independent object. Remove
-            # the full child bbox from any larger parent asset so deleting
-            # the card in PowerPoint does not reveal an identical baked copy.
-            mask = np.ones(crop_child.shape[:2], dtype=bool)
-        elif role == "subicon":
-            gray = cv2.cvtColor(crop_child, cv2.COLOR_BGR2GRAY)
-            hsv_ = cv2.cvtColor(crop_child, cv2.COLOR_BGR2HSV)
-            mask = (gray > 185) & (hsv_[:, :, 1] < 70)
-        elif role in {"badge_subicon", "connector", "line_subicon"}:
-            mask = _line_art_alpha(crop_child) > 12
-        elif role in {"internal", "preserve_visual_icon"}:
-            mask = np.ones(crop_child.shape[:2], dtype=bool)
-        else:
-            gray = cv2.cvtColor(crop_child, cv2.COLOR_BGR2GRAY)
-            hsv_ = cv2.cvtColor(crop_child, cv2.COLOR_BGR2HSV)
-            diff_white = np.abs(crop_child.astype(int) - 255).max(axis=2)
-            mask = ((gray < 245) & (diff_white > 5)) | (hsv_[:, :, 1] > 12)
-            if int(mask.sum()) < 20:
-                mask = np.ones(crop_child.shape[:2], dtype=bool)
-        mask = cv2.dilate(mask.astype(np.uint8), np.ones((3, 3), np.uint8),
-                          iterations=1).astype(bool)
-        return (cx1, cy1, cx2, cy2), mask
-
-    def _contained_child_entries(
-        self, parent: dict,
-        parent_box: tuple[int, int, int, int],
-    ) -> list[dict]:
-        px1, py1, px2, py2 = parent_box
-        p_area = max(1, (px2 - px1) * (py2 - py1))
-        pw = max(1, px2 - px1)
-        ph = max(1, py2 - py1)
-        out: list[dict] = []
-        for child in self.image_inventory:
-            if child is parent:
-                continue
-            role = child.get("role")
-            if role in {"background", "outline"}:
-                continue
-            cx1, cy1, cx2, cy2 = (int(v) for v in child["bbox"])
-            c_area = max(1, (cx2 - cx1) * (cy2 - cy1))
-            if c_area >= p_area * 0.55:
-                continue
-            cw, ch = cx2 - cx1, cy2 - cy1
-            if (
-                parent.get("role") == "container"
-                and role == "connector"
-                and connector_on_container_border(
-                    parent_box, (cx1, cy1, cx2, cy2))
-            ):
-                continue
-            explicit_child = role in _CHILD_ROLES
-            implicit_small_child = c_area <= 18000 and max(cw, ch) <= 180
-            implicit_flat_child = (
-                c_area <= 30000
-                and min(cw, ch) <= 90
-                and cw <= 0.95 * pw
-                and ch <= 0.80 * ph
-            )
-            if (not explicit_child and not implicit_small_child
-                    and not implicit_flat_child):
-                continue
-            ox1, oy1 = max(px1, cx1), max(py1, cy1)
-            ox2, oy2 = min(px2, cx2), min(py2, cy2)
-            if ox2 <= ox1 or oy2 <= oy1:
-                continue
-            if (ox2 - ox1) * (oy2 - oy1) >= 0.85 * c_area:
-                out.append(child)
-        return out
-
     def _connector_carried_by_container(self, el: dict) -> bool:
         if el.get("role") != "connector":
             return False
@@ -236,46 +128,6 @@ class LayoutBuilder:
             if connector_on_container_border(parent_box, child_box):
                 return True
         return False
-
-    def _inpaint_children_for_parent_asset(
-        self,
-        crop_bgr: np.ndarray,
-        parent: dict,
-        parent_box: tuple[int, int, int, int],
-    ) -> np.ndarray:
-        role = parent.get("role")
-        if role in {
-            "background", "internal", "subicon",
-            "badge_subicon", "connector", "line_subicon",
-        }:
-            return crop_bgr
-        children = self._contained_child_entries(parent, parent_box)
-        if not children:
-            return crop_bgr
-        px1, py1, px2, py2 = parent_box
-        mask = np.zeros(crop_bgr.shape[:2], dtype=bool)
-        for child in children:
-            child_mask_info = self._child_inpaint_mask(child)
-            if child_mask_info is None:
-                continue
-            (cx1, cy1, cx2, cy2), child_mask = child_mask_info
-            ox1, oy1 = max(px1, cx1), max(py1, cy1)
-            ox2, oy2 = min(px2, cx2), min(py2, cy2)
-            if ox2 <= ox1 or oy2 <= oy1:
-                continue
-            dst_x1, dst_y1 = ox1 - px1, oy1 - py1
-            dst_x2, dst_y2 = ox2 - px1, oy2 - py1
-            src_x1, src_y1 = ox1 - cx1, oy1 - cy1
-            src_x2 = src_x1 + (dst_x2 - dst_x1)
-            src_y2 = src_y1 + (dst_y2 - dst_y1)
-            mask[dst_y1:dst_y2, dst_x1:dst_x2] |= (
-                child_mask[src_y1:src_y2, src_x1:src_x2])
-        if int(mask.sum()) < 4:
-            return crop_bgr
-        patched = crop_bgr.copy()
-        inpaint_region_inplace(patched, mask, radius=3,
-                               scale=self.inpaint_scale)
-        return patched
 
     # ------------------------------------------------------------------
     # Outline routing helpers (formerly nested closures in _run)
@@ -505,6 +357,12 @@ class LayoutBuilder:
                             x2: int, y2: int) -> None:
         asset_name = f"{el['id']}.png"
         role = el.get("role")
+        if el.get("partition_tile"):
+            # PowerPoint can round adjacent picture edges to different
+            # device pixels. A one-pixel shared edge prevents hairline gaps.
+            h_src, w_src = self.source.shape[:2]
+            x2 = min(w_src, x2 + 1)
+            y2 = min(h_src, y2 + 1)
         if self._connector_carried_by_container(el):
             return
         if role == "container":
@@ -520,6 +378,16 @@ class LayoutBuilder:
             src_img = self.cleaned
         mask_path = el.get("mask_path")
         has_mask = bool(mask_path and Path(mask_path).exists())
+        if el.get('extraction'):
+            # Exact detector support and source pixels are kept until every
+            # replacement object and carrier asset has been validated.
+            src_img = self.text_only if self.text_only is not None else self.cleaned
+            if has_mask:
+                self._emit_masked_image(
+                    el, asset_name, mask_path, src_img,
+                    src_img[y1:y2, x1:x2].copy(), [],
+                    x1, y1, x2, y2, True, False)
+            return
         if role == "outline" and self._outline_carried_by_large_parent(el):
             return
         native_outline = (
@@ -575,8 +443,6 @@ class LayoutBuilder:
             (x1, y1, x2, y2), src_img, self.text_boxes, role,
             allow_text_overlap=text_erased_crop)
         crop = src_img[y1:y2, x1:x2].copy()
-        crop = self._inpaint_children_for_parent_asset(
-            crop, el, (int(x1), int(y1), int(x2), int(y2)))
         contained_outline_boxes = (
             self._contained_child_outline_boxes(el)
             if role == "outline" else []
@@ -624,8 +490,6 @@ class LayoutBuilder:
             sx1, sy1, sx2, sy2 = split_box
             split_asset_name = f"{el['id']}_s{idx:02d}.png"
             split_crop = src_img[sy1:sy2, sx1:sx2].copy()
-            split_crop = self._inpaint_children_for_parent_asset(
-                split_crop, el, split_box)
             if self._is_empty_asset(split_crop, None, sparse_ok=sparse_visual):
                 continue
             cv2.imwrite(str(self.asset_dir / split_asset_name), split_crop)
@@ -654,13 +518,6 @@ class LayoutBuilder:
         if m is None or m.shape[:2] != src_img.shape[:2]:
             return False
         alpha = m[y1:y2, x1:x2].copy()
-        for cx1, cy1, cx2, cy2 in contained_outline_boxes:
-            rx1 = max(0, cx1 - int(x1) - 3)
-            ry1 = max(0, cy1 - int(y1) - 3)
-            rx2 = min(alpha.shape[1], cx2 - int(x1) + 3)
-            ry2 = min(alpha.shape[0], cy2 - int(y1) + 3)
-            if rx2 > rx1 and ry2 > ry1:
-                alpha[ry1:ry2, rx1:rx2] = 0
         if self._is_empty_asset(crop, alpha, sparse_ok=sparse_visual):
             return True
         if scrub_icon_text:
@@ -668,7 +525,8 @@ class LayoutBuilder:
                 crop, (int(x1), int(y1), int(x2), int(y2)),
                 self.text_boxes, alpha=alpha)
         rgba = np.dstack([crop, alpha])
-        cv2.imwrite(str(self.asset_dir / asset_name), rgba)
+        if not cv2.imwrite(str(self.asset_dir / asset_name), rgba):
+            raise OSError(f'Cannot write asset: {asset_name}')
         self.manifest_assets.append({
             "name": asset_name,
             "box": [int(x1), int(y1), int(x2), int(y2)],
@@ -744,6 +602,240 @@ class LayoutBuilder:
         # visually-identical labels (`1000亿元` vs `24.22%`).
         self.text_elements = unify_group_sizes(self.text_elements)
         self.image_elements = topo_sort_by_containment(self.image_elements)
+        self._finalize_composite_backplates()
+        self._finalize_extractions()
+
+    def _finalize_extractions(self) -> None:
+        """Commit masks only after every affected, emitted carrier is safe."""
+        original = self.text_only if self.text_only is not None else self.cleaned
+        entries = sorted(
+            (e for e in self.image_inventory if e.get('extraction')),
+            key=lambda e: -(e['bbox'][2]-e['bbox'][0]) * (e['bbox'][3]-e['bbox'][1]))
+        for entry in entries:
+            emitted = {e['name']: e for e in self.image_elements}
+            child = emitted.get(entry['id'])
+            audit = {'child_id': entry['id'], 'state': 'retained_in_parent',
+                     'inventory_id': entry['id'], 'parent_ids': [],
+                     'masked_pixels': 0,
+                     'geometry_candidate_id': entry.get('geometry_candidate_id'),
+                     'geometry_parent_bbox': entry.get('geometry_parent_bbox'),
+                     'geometry_kind': entry.get('geometry_kind')}
+            self.extraction_audit.append(audit)
+            if child is None:
+                audit['reason'] = 'child_not_emitted'
+                entry['extraction'].update(state='retained_in_parent',
+                                           reason=audit['reason'])
+                continue
+            x1, y1, x2, y2 = map(int, entry['bbox'])
+            mask = cv2.imread(entry['extraction']['mask_path'], cv2.IMREAD_GRAYSCALE)
+            if mask is None or mask.shape != original.shape[:2]:
+                reason = 'invalid_detector_mask'
+                support = None
+            else:
+                support = mask[y1:y2, x1:x2] > 0
+                asset = cv2.imread(str(self.asset_dir / f"{entry['id']}.png"), cv2.IMREAD_UNCHANGED)
+                reason = validate_child_asset(asset, original[y1:y2, x1:x2], support)
+            pending = []
+            recovered = None
+            if reason is None:
+                recovered, metrics = fit_background(original, mask > 0)
+                if (recovered is None and entry.get('geometry_kind') in {'rectangle','closed_polygon'}
+                        and (x2-x1) > 1.3*(y2-y1)):
+                    # Adjacent flow polygons contaminate each other's ring.
+                    # Exclude validated peers only while fitting a backdrop;
+                    # each later commit still removes ONLY this child's mask.
+                    union = mask > 0
+                    peers = [entry['id']]
+                    for peer in entries:
+                        if peer is entry or peer['id'] not in emitted:
+                            continue
+                        if peer.get('geometry_kind') not in {'rectangle','closed_polygon'}:
+                            continue
+                        ax,ay,bx,by = map(int,peer['bbox'])
+                        if (min(by-ay,y2-y1)/max(by-ay,y2-y1) < .8
+                                or abs((ay+by-y1-y2)/2) > .12*(y2-y1)
+                                or min(bx-ax,x2-x1)/max(bx-ax,x2-x1) < .55):
+                            continue
+                        pm = cv2.imread(peer['extraction']['mask_path'],cv2.IMREAD_GRAYSCALE)
+                        pa = cv2.imread(str(self.asset_dir/f"{peer['id']}.png"),cv2.IMREAD_UNCHANGED)
+                        if pm is None or pm.shape != mask.shape:
+                            continue
+                        if validate_child_asset(pa,original[ay:by,ax:bx],pm[ay:by,ax:bx]>0):
+                            continue
+                        if np.count_nonzero(union & (pm>0)) > .04*np.count_nonzero(pm):
+                            continue
+                        union |= pm>0
+                        peers.append(peer['id'])
+                    if len(peers) >= 3:
+                        recovered, metrics = fit_background(original,union)
+                        audit['background_evidence_ids'] = peers
+                audit['background_validation'] = metrics
+            if reason is None:
+                for parent in self.image_elements:
+                    if parent is child:
+                        continue
+                    px, py, pw, ph = map(int, parent['box'])
+                    ix1, iy1 = max(px, x1), max(py, y1)
+                    ix2, iy2 = min(px+pw, x2), min(py+ph, y2)
+                    if ix2 <= ix1 or iy2 <= iy1:
+                        continue
+                    local_support = support[iy1-y1:iy2-y1, ix1-x1:ix2-x1]
+                    if not np.any(local_support):
+                        continue
+                    # Only a strict spatial ancestor may own this child.
+                    # Merely having a slightly larger bbox is insufficient:
+                    # adjacent polygons can overlap at their antialiased
+                    # edges, and treating one sibling as the other's carrier
+                    # would patch the sibling asset before it is validated.
+                    child_area = (x2-x1)*(y2-y1)
+                    contains_child = (
+                        px <= x1 and py <= y1
+                        and px + pw >= x2 and py + ph >= y2
+                    )
+                    if not contains_child:
+                        continue
+                    if (px, py, pw, ph) == tuple(child['box']):
+                        reason = 'duplicate_carrier'
+                        break
+                    if pw*ph <= child_area:
+                        # Equal-area or smaller containment cannot represent
+                        # a genuine parent carrier.
+                        continue
+                    path = self.asset_dir / Path(parent['path']).name
+                    pixels = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+                    if pixels is None or pixels.shape[:2] != (ph, pw):
+                        reason = 'carrier_asset_invalid'
+                        break
+                    removal = np.zeros((ph, pw), dtype=bool)
+                    removal[iy1-py:iy2-py, ix1-px:ix2-px] = local_support
+                    if pixels.shape[2] == 4:
+                        removal &= pixels[:, :, 3] > 0
+                    if not np.any(removal):
+                        continue
+                    # A transparent sibling may have a containing bbox while
+                    # only a small part of the proposed child is actually
+                    # opaque in that asset. It is not a valid carrier for the
+                    # full child, and patching it would corrupt the sibling.
+                    support_coverage = (
+                        float(np.count_nonzero(removal))
+                        / max(1, int(np.count_nonzero(local_support)))
+                    )
+                    if support_coverage < .995:
+                        continue
+                    expected = original[py:py+ph,px:px+pw,:3]
+                    match = np.max(np.abs(pixels[:,:,:3].astype(np.int16)-expected.astype(np.int16)),axis=2) <= 2
+                    fraction = float(np.mean(match[removal]))
+                    if fraction < .05:
+                        # An earlier ancestor extraction already removed
+                        # this child from this carrier; do not paint it back.
+                        continue
+                    if fraction < .95:
+                        reason = 'carrier_pixels_partially_replaced'
+                        break
+                    if recovered is None:
+                        reason = metrics['reason']
+                        break
+                    patched = pixels.copy()
+                    patched[:,:,:3][removal] = recovered[py:py+ph,px:px+pw,:3][removal]
+                    pending.append((parent['name'], path, patched, int(removal.sum()), metrics))
+            if reason is None and not pending and entry.get('role') == 'geometry':
+                reason = 'no_carrier_for_geometry'
+            if reason is not None:
+                # Parents are untouched: dropping an unsuccessful child
+                # cannot lose content or expose a duplicate when moved.
+                self.image_elements = [e for e in self.image_elements if e['name'] != entry['id']]
+                self.manifest_assets = [a for a in self.manifest_assets if a['name'] != f"{entry['id']}.png"]
+                audit['reason'] = reason
+                entry['extraction'].update(state='retained_in_parent', reason=reason)
+                continue
+            for parent_id, path, patched, count, metrics in pending:
+                if not cv2.imwrite(str(path), patched):
+                    raise OSError(f'Cannot commit parent asset: {path}')
+                audit['parent_ids'].append(parent_id)
+                audit['masked_pixels'] += count
+            audit.update(state='exported', reason='validated_extraction' if pending else 'standalone',
+                         exported_object_id=child['name'])
+            entry['extraction'].update(
+                state='exported', reason=audit['reason'],
+                exported_object_id=child['name'])
+
+    def _finalize_composite_backplates(self) -> None:
+        """Use exact emitted partitions; otherwise keep the intact parent."""
+        emitted_ids = {
+            str(el.get("name"))
+            for el in self.image_elements + self.shape_elements
+        }
+        image_by_id = {
+            str(el.get("name")): el for el in self.image_elements
+        }
+        for parent in self.image_inventory:
+            if not parent.get("composite_backplate"):
+                continue
+            element = image_by_id.get(str(parent["id"]))
+            if element is None:
+                continue
+            linked_ids = set(parent.get("child_ids", []))
+            if not parent.get("color_partition") or not linked_ids:
+                self.composite_export_audit.append({
+                    "parent_id": parent["id"], "mode": "retained",
+                    "reason": "no_certified_partition", "masked_pixels": 0,
+                })
+                continue
+            if not linked_ids <= emitted_ids:
+                self.composite_export_audit.append({
+                    "parent_id": parent["id"], "mode": "retained",
+                    "reason": "missing_partition_child", "masked_pixels": 0,
+                })
+                continue
+            px1, py1, px2, py2 = (int(v) for v in parent["bbox"])
+            covered = np.zeros((py2 - py1, px2 - px1), dtype=bool)
+            opaque = True
+            for child in self.image_inventory:
+                if child.get("id") not in linked_ids:
+                    continue
+                cx1, cy1, cx2, cy2 = (int(v) for v in child["bbox"])
+                if (cx1 < px1 or cy1 < py1 or cx2 > px2 or cy2 > py2):
+                    opaque = False
+                    break
+                child_asset = self.asset_dir / f"{child['id']}.png"
+                asset = cv2.imread(str(child_asset), cv2.IMREAD_UNCHANGED)
+                if asset is None or (asset.ndim == 3 and asset.shape[2] == 4
+                                     and np.mean(asset[:, :, 3] > 16) < 0.98):
+                    opaque = False
+                    break
+                covered[cy1 - py1:cy2 - py1,
+                        cx1 - px1:cx2 - px1] = True
+            coverage = float(covered.mean()) if covered.size else 0.0
+            if not opaque or coverage < 0.995:
+                self.composite_export_audit.append({
+                    "parent_id": parent["id"], "mode": "retained",
+                    "reason": "partition_incomplete",
+                    "coverage": round(coverage, 5), "masked_pixels": 0,
+                })
+                continue
+            self.image_elements = [
+                image for image in self.image_elements
+                if image.get("name") != parent["id"]
+            ]
+            self.manifest_assets = [
+                asset for asset in self.manifest_assets
+                if asset.get("name") != f"{parent['id']}.png"
+            ]
+            self.composite_export_audit.append({
+                "parent_id": parent["id"], "mode": "partitioned",
+                "emitted_child_ids": sorted(linked_ids),
+                "coverage": round(coverage, 5), "masked_pixels": 0,
+            })
+        parent_by_id = {
+            str(parent["id"]): parent for parent in self.image_inventory
+            if parent.get("composite_backplate")
+        }
+        for record in self.composite_export_audit:
+            parent = parent_by_id[record["parent_id"]]
+            linked = set(parent.get("child_ids", []))
+            record["candidate_box_count"] = len(parent.get("child_bboxes", []))
+            record["linked_child_ids"] = sorted(linked)
+            record["unemitted_child_ids"] = sorted(linked - emitted_ids)
 
     def write(self) -> None:
         manifest = {
@@ -767,6 +859,8 @@ class LayoutBuilder:
             "elements": (self.shape_elements
                          + self.image_elements
                          + self.text_elements),
+            "composite_export_audit": self.composite_export_audit,
+            "extraction_audit": self.extraction_audit,
         }
         Path(self.args.out_layout).parent.mkdir(parents=True, exist_ok=True)
         Path(self.args.out_layout).write_text(

@@ -18,7 +18,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
 from text_safety import ppt_safe_text  # noqa: E402
 
 from layout.bbox_shape import _trim_short_stat_text_bbox
-from layout.render_font import default_ppt_font
+from layout.render_font import default_ppt_font, resolve_ppt_font
 from layout.render_ink import _target_text_metrics
 from layout.text_mixed import mixed_size_runs_from_char_boxes
 from layout.text_sizing import (
@@ -130,11 +130,15 @@ def _emit_text_element_record(
     text_italic = False
     # ML font classifier (ResNet-34 INT8 ONNX). Only override the heuristic
     # font/bold/italic when the prediction is confident enough; otherwise the
-    # downstream render_fit + heuristic path stays in charge.
+    # downstream render_fit + heuristic path stays in charge. Resolve the
+    # predicted label to a locally installed family before writing PPTX XML;
+    # classifier labels can be aliases that Office does not recognize.
     if font_pred is not None and font_pred["family_confidence"] >= _FONT_CONF_THRESHOLD:
-        ppt_font = font_pred["family"]
+        ppt_font = resolve_ppt_font(font_pred["family"], text=safe_text)
         text_bold = bool(font_pred["is_bold"])
         text_italic = bool(font_pred["is_italic"])
+    else:
+        ppt_font = resolve_ppt_font(ppt_font, text=safe_text)
     run_sized = any(r.get("size") is not None
                     for r in style.get("runs", []))
     compact_text = "".join(c for c in safe_text if not c.isspace())
@@ -156,6 +160,10 @@ def _emit_text_element_record(
             pt_per_px=pt_per_px,
         )
         if render_fit is not None:
+            # The selected local face is the one whose rendered glyphs were
+            # compared with the source crop. Keep the emitted PPT family in
+            # sync with that measurement, not only its size and weight.
+            ppt_font = render_fit["font"]
             size = int(render_fit["size"])
             text_bold = bool(render_fit["bold"])
     # Tight bbox: do NOT inflate the text box beyond what OCR found.
@@ -211,6 +219,7 @@ def _emit_text_element_record(
     if font_pred is not None:
         record["font_pred"] = {
             "family": font_pred["family"],
+            "resolved_family": ppt_font,
             "family_confidence": font_pred["family_confidence"],
             "bold_confidence": font_pred["bold_confidence"],
             "italic_confidence": font_pred["italic_confidence"],

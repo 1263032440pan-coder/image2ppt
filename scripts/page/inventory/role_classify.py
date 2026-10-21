@@ -1,8 +1,9 @@
 """Per-component shape classifiers used by the inventory builder.
 
-These decide whether a connected component looks like a container
-(card / panel) or a connector (line / arrow). The builder uses the
-returned role tag to pick crop sources and routing further down.
+These describe how a detected crop looks (card / panel or connector).
+They do not decide whether a large connected component is atomic; the
+inventory builder splits large regions first, then uses the role to choose
+asset routing and whether a composite backplate is appropriate.
 """
 from __future__ import annotations
 
@@ -79,8 +80,21 @@ def is_container_like(crop: np.ndarray, scale: float) -> bool:
         and max(left, right) >= 0.45
     )
     fill_density = float(fg.sum()) / float(max(1, w * h))
+    fg_hsv = hsv[fg]
+    dominant_fill_fraction = 0.0
+    if len(fg_hsv):
+        # A dense photograph or detailed screenshot is not a card merely
+        # because most pixels differ from white. A real filled panel usually
+        # has one dominant fill colour with sparse text and icon colours.
+        h_bin = (fg_hsv[:, 0] // 12).astype(np.int32)
+        s_bin = (fg_hsv[:, 1] // 32).astype(np.int32)
+        v_bin = (fg_hsv[:, 2] // 32).astype(np.int32)
+        color_bins = h_bin * 64 + s_bin * 8 + v_bin
+        color_counts = np.bincount(color_bins, minlength=15 * 64)
+        dominant_fill_fraction = float(color_counts.max()) / len(fg_hsv)
     filled_shape = (
         fill_density >= 0.45
+        and dominant_fill_fraction >= 0.58
         and max(w, h) >= s_length(70, scale)
         and max(w, h) / float(max(1, min(w, h))) <= 8.0
     )

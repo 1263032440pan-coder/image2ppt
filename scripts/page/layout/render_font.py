@@ -11,60 +11,148 @@ SCRIPTS_ROOT = Path(__file__).resolve().parents[2]    # scripts/
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from fontconfig_helper import fontconfig_font_path  # noqa: E402
+from fontconfig_helper import (  # noqa: E402
+    font_families_match,
+    fontconfig_font_path,
+)
 
 
 _FONT_CANDIDATES_CACHE: list[dict] | None = None
 _FONT_CACHE: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
 _TEXT_RENDER_CACHE: dict[tuple[str, str, int, bool], dict | None] = {}
 
+_CJK_FONT_PREFERENCE = (
+    "Microsoft YaHei", "Microsoft YaHei UI",
+    "Alibaba PuHuiTi", "Alibaba PuHuiTi 2.0",
+    "Noto Sans CJK SC", "Noto Sans SC",
+    "SimHei", "SimSun", "KaiTi", "FangSong",
+    "PingFang SC", "Hiragino Sans GB", "STHeiti", "Songti",
+    "Noto Serif CJK SC", "Noto Serif SC",
+)
+_LATIN_FONT_PREFERENCE = (
+    "Arial", "Aptos", "Calibri", "Helvetica", "Tahoma", "Verdana",
+    "Times New Roman", "Cambria", "Consolas", "Corbel",
+)
+_CJK_FAMILY_MARKERS = (
+    "yahei", "puhuiti", "notosanssc", "notosanscjk",
+    "notoserifsc", "notoserifcjk", "arialunicodems", "simhei",
+    "simsun", "kaiti", "fangsong", "pingfang", "hiragino", "stheiti",
+    "songti", "heiti",
+)
+
+
+def has_cjk_text(text: str) -> bool:
+    return any(
+        "\u2e80" <= char <= "\u9fff"
+        or "\uf900" <= char <= "\ufaff"
+        or "\u3040" <= char <= "\u30ff"
+        or "\uac00" <= char <= "\ud7af"
+        for char in str(text or "")
+    )
+
+
+def is_cjk_font_family(family: str) -> bool:
+    compact = "".join(ch for ch in str(family or "").casefold()
+                      if ch.isalnum())
+    return any(marker in compact for marker in _CJK_FAMILY_MARKERS)
+
 
 def default_ppt_font() -> str:
-    """Target PPT font family. macOS QA may substitute it locally, but the
-    PPTX preserves the intended family name."""
+    """Return a CJK family that is actually installed on this machine."""
+    for family in _CJK_FONT_PREFERENCE:
+        path = fontconfig_font_path(f"{family}:style=Regular")
+        if not path:
+            continue
+        try:
+            actual_family, _style = ImageFont.truetype(path, 16).getname()
+        except OSError:
+            continue
+        if actual_family and is_cjk_font_family(actual_family):
+            return actual_family
+    # Keep the historical default as the last-resort name for systems where
+    # font metadata cannot be queried; the PPTX remains editable there.
     return "Microsoft YaHei"
 
 
-def _font_candidates() -> list[dict]:
-    """Local render fonts that also have usable PPT font-family names."""
+def _font_candidates(preferred_family: str | None = None,
+                     *, cjk: bool | None = None) -> list[dict]:
+    """Return installed fonts with Office family names and renderable files.
+
+    ``fc-match`` is not present on normal Windows installations. The shared
+    font lookup falls back to Windows' installed-font registry, so the same
+    visual-fit path works on Windows, macOS and Linux.
+    """
     global _FONT_CANDIDATES_CACHE
     if _FONT_CANDIDATES_CACHE is not None:
-        return _FONT_CANDIDATES_CACHE
+        candidates = list(_FONT_CANDIDATES_CACHE)
+    else:
+        names = list(dict.fromkeys((
+            *_CJK_FONT_PREFERENCE,
+            default_ppt_font(),
+            *_LATIN_FONT_PREFERENCE,
+        )))
+        out: list[dict] = []
+        seen_families: set[str] = set()
+        for name in names:
+            path = fontconfig_font_path(f"{name}:style=Regular")
+            if not path:
+                continue
+            try:
+                actual_family, _style = ImageFont.truetype(path, 16).getname()
+            except OSError:
+                continue
+            family_key = "".join(ch for ch in actual_family.casefold()
+                                 if ch.isalnum())
+            if not actual_family or family_key in seen_families:
+                continue
+            seen_families.add(family_key)
+            out.append({
+                "ppt_name": actual_family,
+                "path": path,
+                "cjk": is_cjk_font_family(actual_family),
+                "penalty": len(out) * 0.005,
+            })
+        _FONT_CANDIDATES_CACHE = out
+        candidates = list(out)
 
-    yahei_path = fontconfig_font_path("Microsoft YaHei:style=Regular")
-    # Keep the default first. One stable CJK sans candidate avoids
-    # line-by-line face flipping inside the same paragraph.
-    specs: list[tuple[str, str, float]] = []
-    if yahei_path:
-        specs.append(("Microsoft YaHei", yahei_path, 0.00))
-    specs.extend([
-        ("Arial Unicode MS", "/Library/Fonts/Arial Unicode.ttf", 0.00),
-        ("Arial Unicode MS",
-         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf", 0.02),
-        ("Hiragino Sans GB", "/System/Library/Fonts/Hiragino Sans GB.ttc",
-         0.06),
-    ])
-    if not Path("/System/Library/Fonts/Hiragino Sans GB.ttc").exists():
-        specs.append(("Heiti TC", "/System/Library/Fonts/STHeiti Medium.ttc",
-                      0.06))
-    seen_paths: set[str] = set()
-    out: list[dict] = []
-    for ppt_name, raw_path, penalty in specs:
-        path = Path(raw_path)
-        if not path.exists() or str(path) in seen_paths:
-            continue
-        try:
-            ImageFont.truetype(str(path), 16)
-        except OSError:
-            continue
-        seen_paths.add(str(path))
-        out.append({
-            "ppt_name": ppt_name,
-            "path": str(path),
-            "penalty": float(penalty),
-        })
-    _FONT_CANDIDATES_CACHE = out
-    return out
+    if cjk is not None:
+        filtered = [item for item in candidates if item["cjk"] is cjk]
+        # If no font was positively identified as CJK, preserve the available
+        # local list instead of leaving the layout without a fit candidate.
+        if filtered:
+            candidates = filtered
+    if preferred_family:
+        candidates.sort(key=lambda item: (
+            0 if font_families_match(preferred_family, item["ppt_name"]) else 1,
+            float(item.get("penalty", 0.0)),
+        ))
+    return candidates
+
+
+def resolve_ppt_font(family: str | None, *, text: str = "") -> str:
+    """Resolve a predicted family to an installed, PowerPoint-visible name."""
+    requested = str(family or "").strip()
+    cjk = has_cjk_text(text) or is_cjk_font_family(requested)
+    # Honor any installed requested family first, including fonts outside the
+    # classifier's preferred list. fontconfig_font_path validates the file's
+    # internal family name, so an unrelated fallback cannot pass this check.
+    if requested:
+        path = fontconfig_font_path(f"{requested}:style=Regular")
+        if path:
+            try:
+                actual_family, _style = ImageFont.truetype(path, 16).getname()
+            except OSError:
+                actual_family = ""
+            if actual_family and font_families_match(requested, actual_family):
+                return actual_family
+
+    candidates = _font_candidates(cjk=cjk)
+    for candidate in candidates:
+        if requested and font_families_match(requested, candidate["ppt_name"]):
+            return candidate["ppt_name"]
+    if candidates:
+        return candidates[0]["ppt_name"]
+    return requested or "Microsoft YaHei"
 
 
 def _load_font(path: str, pixel_size: int) -> ImageFont.FreeTypeFont | None:
