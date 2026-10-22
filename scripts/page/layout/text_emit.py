@@ -29,21 +29,73 @@ from layout.text_sizing import (
     _unify_run_sizes_by_color,
     font_size_pt,
 )
-from layout.font_predict import predict_font_from_bbox
 from layout.text_style import detect_text_style
-
-# When the ML font classifier returns family confidence below this floor we
-# keep the heuristic font instead of trusting a low-confidence guess. The
-# value was picked from the holdout confusion analysis: confident predictions
-# above ~0.6 are >99% correct, low-confidence ones often confuse visually
-# similar pairs (Helvetica/Arial, SimSun/Songti) where the heuristic default
-# is at least as safe.
-_FONT_CONF_THRESHOLD = 0.60
 from layout.text_units import (
     _derive_source_char_boxes,
     _estimated_runs_width_px,
     _estimated_text_width_px,
 )
+
+
+def _char_box_source(el: dict, raw_text: str, char_boxes,
+                    words, word_boxes) -> str:
+    if (char_boxes is not None and len(char_boxes) == len(raw_text)
+            and isinstance(el.get("chars"), list)
+            and "".join(str(ch) for ch in el["chars"]) == raw_text):
+        return "ocr_char_boxes"
+    if (words is not None and word_boxes is not None
+            and len(words) == len(word_boxes)
+            and "".join(str(word) for word in words) == raw_text):
+        return "word_boxes_proportional"
+    return "line_bbox_proportional"
+
+
+def _fit_inline_runs(runs: list[dict], text: str, char_boxes,
+                     source: np.ndarray, fit_text_render,
+                     pt_per_px: float, fallback_size: int) -> None:
+    """Fit each sized run against local font renders, preserving its bbox."""
+    if (not char_boxes or len(char_boxes) != len(text)
+            or "".join(str(run.get("text") or "") for run in runs) != text):
+        return
+    offset = 0
+    for run in runs:
+        run_text = str(run.get("text") or "")
+        start, end = offset, offset + len(run_text)
+        offset = end
+        boxes = char_boxes[start:end]
+        if not run_text.strip() or len(boxes) != len(run_text) or not boxes:
+            continue
+        try:
+            x1 = min(int(box[0]) for box in boxes)
+            y1 = min(int(box[1]) for box in boxes)
+            x2 = max(int(box[2]) for box in boxes)
+            y2 = max(int(box[3]) for box in boxes)
+        except (TypeError, ValueError, IndexError):
+            continue
+        try:
+            fit = fit_text_render(
+                run_text, source, (x1, y1, x2, y2),
+                initial_size=int(run.get("size") or fallback_size),
+                initial_bold=False,
+                initial_font=default_ppt_font(run_text),
+                pt_per_px=pt_per_px,
+            )
+        except Exception as exc:
+            fit = None
+            run["font_fit_fallback_reason"] = (
+                f"render_exception:{type(exc).__name__}")
+        if fit is None:
+            run["font"] = default_ppt_font(run_text)
+            run["bold"] = False
+            run["italic"] = False
+            run.setdefault("font_fit_fallback_reason",
+                           "no_usable_local_render_fit")
+            continue
+        run["font"] = resolve_ppt_font(fit["font"], text=run_text)
+        run["size"] = int(fit["size"])
+        run["bold"] = bool(fit["bold"])
+        run["italic"] = bool(fit["italic"])
+        run["font_fit_score"] = fit["score"]
 
 
 def _emit_text_element_record(
@@ -82,11 +134,11 @@ def _emit_text_element_record(
         wd = wb = None
     source_char_boxes = _derive_source_char_boxes(
         raw_text, (int(x1), int(y1), int(x2), int(y2)), cb, wd, wb)
+    char_box_source = _char_box_source(el, raw_text, cb, wd, wb)
     style = detect_text_style([x1, y1, x2, y2], source,
                               text=raw_text,
                               char_boxes=source_char_boxes,
                               words=wd, word_boxes=wb)
-    font_pred = predict_font_from_bbox(source, [x1, y1, x2, y2], bgr=True)
     apply_run_sizes = _should_apply_run_font_sizes(raw_text)
     if "runs" in style:
         for r in style["runs"]:
@@ -104,7 +156,6 @@ def _emit_text_element_record(
         mixed_size = mixed_size_runs_from_char_boxes(
             raw_text, source, (int(x1), int(y1), int(x2), int(y2)),
             source_char_boxes, style.get("runs"), style["color"],
-            bold=bool(style["bold"]),
             pt_per_px=pt_per_px,
         )
         if mixed_size is not None:
@@ -125,50 +176,35 @@ def _emit_text_element_record(
                         pt_per_px=pt_per_px)
     if mixed_size is not None:
         size = max(int(size), int(mixed_size["base_size"]))
-    ppt_font = default_ppt_font()
-    text_bold = bool(style["bold"])
+    ppt_font = default_ppt_font(safe_text)
+    text_bold = False
     text_italic = False
-    # ML font classifier (ResNet-34 INT8 ONNX). Only override the heuristic
-    # font/bold/italic when the prediction is confident enough; otherwise the
-    # downstream render_fit + heuristic path stays in charge. Resolve the
-    # predicted label to a locally installed family before writing PPTX XML;
-    # classifier labels can be aliases that Office does not recognize.
-    if font_pred is not None and font_pred["family_confidence"] >= _FONT_CONF_THRESHOLD:
-        ppt_font = resolve_ppt_font(font_pred["family"], text=safe_text)
-        text_bold = bool(font_pred["is_bold"])
-        text_italic = bool(font_pred["is_italic"])
-    else:
-        ppt_font = resolve_ppt_font(ppt_font, text=safe_text)
     run_sized = any(r.get("size") is not None
                     for r in style.get("runs", []))
-    compact_text = "".join(c for c in safe_text if not c.isspace())
-    bbox_w = max(1, int(x2 - x1))
-    bbox_h = max(1, int(y2 - y1))
-    badge_like_number = (
-        compact_text.isdigit()
-        and len(compact_text) <= 3
-        and bbox_h >= 24
-        and 0.65 <= (bbox_w / float(bbox_h)) <= 1.60
-    )
     render_fit = None
-    if not run_sized and not badge_like_number:
-        render_fit = fit_text_render(
-            safe_text, source, (int(x1), int(y1), int(x2), int(y2)),
-            initial_size=int(size),
-            initial_bold=text_bold,
-            initial_font=ppt_font,
-            pt_per_px=pt_per_px,
-        )
-        if render_fit is not None:
-            # The selected local face is the one whose rendered glyphs were
-            # compared with the source crop. Keep the emitted PPT family in
-            # sync with that measurement, not only its size and weight.
-            ppt_font = render_fit["font"]
-            size = int(render_fit["size"])
-            text_bold = bool(render_fit["bold"])
+    render_fit_error = None
+    if not run_sized:
+        try:
+            render_fit = fit_text_render(
+                safe_text, source, (int(x1), int(y1), int(x2), int(y2)),
+                initial_size=int(size), initial_bold=False,
+                initial_font=ppt_font, pt_per_px=pt_per_px,
+            )
+        except Exception as exc:
+            render_fit_error = f"render_exception:{type(exc).__name__}"
+    if render_fit is not None:
+        ppt_font = resolve_ppt_font(render_fit["font"], text=safe_text)
+        size = int(render_fit["size"])
+        text_bold = bool(render_fit["bold"])
+        text_italic = bool(render_fit["italic"])
+    elif run_sized and style.get("runs"):
+        _fit_inline_runs(
+            style["runs"], safe_text, source_char_boxes, source,
+            fit_text_render, pt_per_px, int(size))
+        ppt_font = str(style["runs"][0].get("font") or ppt_font)
     # Tight bbox: do NOT inflate the text box beyond what OCR found.
     # 6 px right + 2 px bottom safety margin avoids font-metric clip.
-    align = "left"
+    align = str(el.get("align") or "left")
     base_w = int(x2 - x1)
     text_w = max(
         base_w + 6,
@@ -214,16 +250,9 @@ def _emit_text_element_record(
         "font": ppt_font, "size": int(size),
         "bold": text_bold, "italic": text_italic,
         "color": style["color"], "align": align, "valign": valign_mode,
-        "line_spacing": 1.0,
+        "align_source": ("inventory" if el.get("align")
+                         else "single_line_anchor"),
     }
-    if font_pred is not None:
-        record["font_pred"] = {
-            "family": font_pred["family"],
-            "resolved_family": ppt_font,
-            "family_confidence": font_pred["family_confidence"],
-            "bold_confidence": font_pred["bold_confidence"],
-            "italic_confidence": font_pred["italic_confidence"],
-        }
     if (source_char_boxes is not None
             and len(source_char_boxes) == len(raw_text)
             and len(safe_text) == len(raw_text)):
@@ -250,10 +279,19 @@ def _emit_text_element_record(
             "suffix_h": mixed_size["suffix_h"],
             "prefix_bold": mixed_size.get("prefix_bold"),
             "suffix_bold": mixed_size.get("suffix_bold"),
-            "prefix_density": mixed_size.get("prefix_density"),
             "prefix_fit_score": mixed_size["prefix_fit_score"],
             "suffix_fit_score": mixed_size["suffix_fit_score"],
         }
+    run_fit_success = any(
+        run.get("font_fit_score") is not None
+        for run in style.get("runs", []))
+    record["font_fit_source"] = (
+        "local_render_fit" if render_fit is not None else
+        "local_render_fit_runs" if run_fit_success else
+        "script_fallback")
+    if render_fit is None and not run_fit_success:
+        record["font_fit_fallback_reason"] = (
+            render_fit_error or "no_usable_local_render_fit")
     # Optional in-bbox per-character color runs.
     if "runs" in style:
         record["runs"] = style["runs"]

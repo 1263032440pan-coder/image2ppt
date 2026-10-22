@@ -93,6 +93,11 @@ with local consensus picks. `ocr_review_apply.py` merges those picks into
 the OCR JSON files. `build_deck.py` runs erase, inventory extraction,
 layout generation, deck assembly, preview-based font-size calibration,
 preview-based text position calibration, QA inspection, and preview rendering.
+For text style, the layout stage renders candidate faces from locally
+available fonts and compares their ink masks with each source text crop.
+It does not use a font classifier or pixel-rule font/weight classifier.
+If no local candidate fits, the PPTX uses SimHei for Chinese and Times New
+Roman for Latin text.
 
 ## Optional Review
 
@@ -117,12 +122,18 @@ python scripts/build_deck.py --source-dir "$SRC" --work-dir "$RUN"
   calibration.
 - `--skip-calibration`: skip preview-based text size/position calibration.
 - `--font-calibration-iterations 1`: set font-size calibration passes.
-- `--calibration-iterations 4`: set text position calibration passes.
+- `--calibration-iterations 4`: text position calibration passes.
 - `--detect-tables`: enable optional native table reconstruction.
 - `--icon-review`: emit icon-vs-text review packets.
 - `--icon-decisions`: apply filled icon review decisions on a rerun.
 
-These flags can be passed to `scripts/convert.py`.
+Font matching always uses local render fitting. It compares candidate fonts
+available on the machine or in `IMAGE2PPT_FONT_DIRS` against source text
+pixels. A configured font directory is eligible only when its
+`license_manifest.json` declares `matching_allowed: true` for each font file.
+No fonts are downloaded, copied, redistributed, or embedded. When no local
+candidate yields a usable fit, Chinese text falls back to SimHei and Latin
+text to Times New Roman.
 
 ## Validation Standard
 

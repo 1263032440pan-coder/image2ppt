@@ -35,3 +35,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## OPPO Sans 4.0 (optional local font)
+
+This project is configured on this machine to use OPPO Sans 4.0 as an optional local font-matching reference. The font file is installed only in the user's local `AppData\Local\image2ppt\fonts` directory and is not included in this repository.
+
+- Copyright: Copyright 2024 Guangdong OPPO Mobile Telecommunications Corp., Ltd.
+- Official font page and license terms: https://www.coloros.com/article/A00000074/
+- The official archive's `OPPO Sans 4.0 License Notice.txt` is retained alongside the local font.
+- The font remains unmodified. Do not redistribute it as a standalone font or use this repository as an alternate font download channel. Retain the copyright notice and license agreement with any permitted copy; the license requires a prominent notice when the software uses the font.

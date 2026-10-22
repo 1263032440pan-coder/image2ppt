@@ -66,7 +66,6 @@ from layout.color import (  # noqa: E402, F401
     _normalize_run_colors,
     _sampled_color_hex,
 )
-from layout.grouping import unify_group_sizes  # noqa: E402, F401
 from layout.icon_alpha import (  # noqa: E402, F401
     _ICON_PAD_ROLES,
     _SPARSE_VISUAL_ROLES,

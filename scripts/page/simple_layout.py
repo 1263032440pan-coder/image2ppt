@@ -101,6 +101,7 @@ def build_layout(
     ocr: Any,
     slide_height_in: float = DEFAULT_SLIDE_HEIGHT_IN,
     background_color: str = "#FFFFFF",
+    source_image: Any | None = None,
 ) -> dict:
     """Build a per-page layout dict (no I/O).
 
@@ -123,20 +124,42 @@ def build_layout(
         w = item["x2"] - item["x1"]
         h = item["y2"] - item["y1"]
         pt = _font_pt(h, source_height, slide_height_in, item["text"])
-        elements.append({
+        element = {
             "type": "text",
             "name": f"t{idx:03d}",
             "text": item["text"],
             "box": [item["x1"], item["y1"], w, h],
             "source_bbox": [item["x1"], item["y1"], item["x2"], item["y2"]],
-            "font": "Microsoft YaHei",
             "size": pt,
             "bold": False,
             "color": "#111111",
             "align": "left",
             "valign": "middle",
             "line_spacing": 1.0,
-        })
+        }
+        if source_image is not None:
+            from layout.render_fit import fit_text_render
+            from layout.render_font import default_ppt_font
+
+            pt_per_px = slide_width_in * 72.0 / max(1, source_width)
+            fit = fit_text_render(
+                item["text"], source_image,
+                (item["x1"], item["y1"], item["x2"], item["y2"]),
+                initial_size=pt, initial_bold=False,
+                initial_font=default_ppt_font(item["text"]),
+                pt_per_px=pt_per_px,
+            )
+            if fit is not None:
+                element.update({
+                    "font": fit["font"],
+                    "size": fit["size"],
+                    "bold": fit["bold"],
+                    "italic": fit["italic"],
+                    "box": fit["box"],
+                    "font_fit_score": fit["score"],
+                    "size_source": "render_fit",
+                })
+        elements.append(element)
 
     return {
         "slide_size": {
@@ -159,6 +182,7 @@ def write_layout(
     ocr_path: Path,
     out_layout_path: Path,
     slide_height_in: float = DEFAULT_SLIDE_HEIGHT_IN,
+    source_image: Any | None = None,
 ) -> dict:
     """Read OCR, build layout, write to disk. Returns the layout dict."""
     ocr = json.loads(Path(ocr_path).read_text(encoding="utf-8"))
@@ -168,6 +192,7 @@ def write_layout(
         background_image_path=clean_rel_path,
         ocr=ocr,
         slide_height_in=slide_height_in,
+        source_image=source_image,
     )
     out_layout_path.parent.mkdir(parents=True, exist_ok=True)
     out_layout_path.write_text(

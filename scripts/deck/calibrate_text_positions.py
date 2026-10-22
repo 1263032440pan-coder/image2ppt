@@ -460,7 +460,7 @@ def _is_dense_small_text(el: dict[str, Any],
     cx = (x1 + x2) / 2.0
     neighbours = 0
     for other in _text_elements(slide):
-        if other is el:
+        if other is el or other.get("paragraphs"):
             continue
         obox = _source_bbox(other)
         if obox is None:
@@ -508,6 +508,16 @@ def _apply_iteration(layout: dict[str, Any],
         for t_idx, el in enumerate(_text_elements(slide)):
             colour = colours.get((s_idx, t_idx))
             if colour is None:
+                continue
+            if el.get("paragraphs"):
+                report.append({
+                    "slide": s_idx + 1,
+                    "iteration": iteration,
+                    "name": el.get("name"),
+                    "text": el.get("text"),
+                    "status": "skipped",
+                    "reason": "paragraph_group_preserves_line_geometry",
+                })
                 continue
             px1, py1, px2, py2 = _box_to_preview(el["box"], scale, ox, oy)
             box_w = max(1, px2 - px1)

@@ -1,10 +1,9 @@
-"""Best-fit font/size/position by comparing local renders to source ink.
+"""Fit local font family and text formatting against source ink.
 
-Renders every candidate (font, bold, size) locally via Pillow, scores
-the result against the source ink mask (height + width + area + shape
-error plus a bias toward the initial size and font), and returns the
-best match. When the best score is still far from the source, returns
-None so the caller falls back to the conservative bbox-height estimate.
+Candidate families come from locally installed or explicitly configured
+fonts. Pillow renders each face and style combination for comparison with
+the source text mask. A missing or poor fit returns ``None`` so the caller
+uses the language-specific font fallback.
 """
 from __future__ import annotations
 
@@ -15,10 +14,9 @@ from layout.render_font import (
     _render_text_metrics,
     font_families_match,
     has_cjk_text,
-    is_cjk_font_family,
 )
 from layout.render_ink import _mask_shape_error, _target_text_metrics
-from layout.text_sizing import _FONT_LADDER, _is_punct_run
+from layout.text_sizing import _FONT_LADDER
 from layout.text_units import _estimated_text_width_px
 
 
@@ -29,6 +27,7 @@ def _binary_size_candidates(
     target_h: int,
     initial_size: int,
     pt_per_px: float,
+    face_index: int = 0,
 ) -> list[int]:
     """Fast-lock likely pt sizes by binary-searching rendered ink height."""
     lo, hi = 5, 96
@@ -36,7 +35,8 @@ def _binary_size_candidates(
         if lo >= hi:
             break
         mid = (lo + hi) // 2
-        metrics = _render_text_metrics(text, font_path, mid, pt_per_px, bold)
+        metrics = _render_text_metrics(
+            text, font_path, mid, pt_per_px, bold, face_index=face_index)
         mid_h = int(metrics["ink_h"]) if metrics else 0
         if mid_h < target_h:
             lo = mid + 1
@@ -60,80 +60,92 @@ def fit_text_render(
     initial_font: str,
     pt_per_px: float,
 ) -> dict | None:
-    """Choose font/size/position by comparing render masks to source ink."""
+    """Choose font/weight/size/position by comparing local renders to ink.
+
+    The default candidate list contains only local, renderable font files.
+    Candidate faces come from the current local-font catalog and exact local
+    family lookups; no classifier or image-derived family rules are consulted.
+    """
     if not text or "\n" in text:
         return None
     target = _target_text_metrics(source, bbox)
     if target is None or target["ink_h"] < 3 or target["ink_w"] < 3:
         return None
-    cjk_text = has_cjk_text(text) or is_cjk_font_family(initial_font)
-    # Punctuation-only detections inherit their classifier-selected CJK
-    # family; otherwise a lone Chinese punctuation mark would be measured
-    # against a Latin-only candidate list.
+    cjk_text = has_cjk_text(text)
     fonts = _font_candidates(
         initial_font,
         cjk=True if cjk_text else False,
+        text=text,
     )
     if not fonts:
         return None
-    if _is_punct_run(text):
-        fonts = [f for f in fonts
-                 if font_families_match(initial_font, f["ppt_name"])] or fonts[:1]
-
     best: dict | None = None
-    bold_options = [bool(initial_bold)]
-    if text.strip() and len(text.strip()) <= 40:
-        bold_options.append(not bool(initial_bold))
+    bold_options = [False, True]
+    italic_options = [False, True]
 
-    for font_idx, font in enumerate(fonts):
+    for font in fonts:
         font_path = font["path"]
+        face_index = int(font.get("index", 0) or 0)
         font_penalty = float(font.get("penalty", 0.0))
-        if not font_families_match(font["ppt_name"], initial_font):
-            font_penalty += 0.02 + font_idx * 0.005
         for bold in bold_options:
-            size_candidates = _binary_size_candidates(
-                text, font_path, bold, int(target["ink_h"]),
-                int(initial_size), pt_per_px,
-            )
-            for size in size_candidates:
-                metrics = _render_text_metrics(text, font_path, size,
-                                               pt_per_px, bold)
-                if not metrics:
-                    continue
-                h_err = abs(metrics["ink_h"] - target["ink_h"]) / max(
-                    1, target["ink_h"])
-                w_err = abs(metrics["ink_w"] - target["ink_w"]) / max(
-                    1, target["ink_w"])
-                area_err = abs(
-                    metrics["ink_area"] - target["ink_area"]) / max(
-                    1, target["ink_area"])
-                shape_err = _mask_shape_error(target["mask"], metrics["mask"])
-                size_penalty = abs(size - int(initial_size)) / max(
-                    16.0, float(initial_size))
-                bold_penalty = 0.0 if bold == bool(initial_bold) else 0.06
-                score = (
-                    0.40 * h_err
-                    + 0.30 * w_err
-                    + 0.12 * min(1.5, area_err)
-                    + 0.12 * shape_err
-                    + 0.035 * min(2.0, size_penalty)
-                    + font_penalty
-                    + bold_penalty
+            try:
+                size_candidates = _binary_size_candidates(
+                    text, font_path, bold, int(target["ink_h"]),
+                    int(initial_size), pt_per_px, face_index=face_index,
                 )
-                candidate = {
-                    "score": float(score),
-                    "height_err": float(h_err),
-                    "width_err": float(w_err),
-                    "shape_err": float(shape_err),
-                    "font": font["ppt_name"],
-                    "font_path": font_path,
-                    "size": int(size),
-                    "bold": bool(bold),
-                    "metrics": metrics,
-                    "target": target,
-                }
-                if best is None or candidate["score"] < best["score"]:
-                    best = candidate
+            except Exception:
+                continue
+            for italic in italic_options:
+                for size in size_candidates:
+                    try:
+                        metrics = _render_text_metrics(
+                            text, font_path, size, pt_per_px, bold,
+                            face_index=face_index, italic=italic)
+                    except Exception:
+                        continue
+                    if not metrics:
+                        continue
+                    h_err = abs(metrics["ink_h"] - target["ink_h"]) / max(
+                        1, target["ink_h"])
+                    w_err = abs(metrics["ink_w"] - target["ink_w"]) / max(
+                        1, target["ink_w"])
+                    area_err = abs(
+                        metrics["ink_area"] - target["ink_area"]) / max(
+                        1, target["ink_area"])
+                    shape_err = _mask_shape_error(
+                        target["mask"], metrics["mask"])
+                    size_penalty = abs(size - int(initial_size)) / max(
+                        16.0, float(initial_size))
+                    visual_loss = (
+                        0.40 * h_err
+                        + 0.30 * w_err
+                        + 0.12 * min(1.5, area_err)
+                        + 0.12 * shape_err
+                    )
+                    prior_penalty = (
+                        0.035 * min(2.0, size_penalty)
+                        + font_penalty
+                    )
+                    score = visual_loss + prior_penalty
+                    candidate = {
+                        "score": float(score),
+                        "visual_loss": float(visual_loss),
+                        "prior_penalty": float(prior_penalty),
+                        "height_err": float(h_err),
+                        "width_err": float(w_err),
+                        "shape_err": float(shape_err),
+                        "font": font["ppt_name"],
+                        "font_path": font_path,
+                        "font_face_id": font.get("font_face_id"),
+                        "face_index": face_index,
+                        "size": int(size),
+                        "bold": bool(bold),
+                        "italic": bool(italic),
+                        "metrics": metrics,
+                        "target": target,
+                    }
+                    if best is None or candidate["score"] < best["score"]:
+                        best = candidate
 
     if best is None:
         return None
@@ -179,10 +191,66 @@ def fit_text_render(
 
     return {
         "font": best["font"],
+        "font_face_id": best.get("font_face_id"),
+        "font_path": best["font_path"],
+        "face_index": int(best.get("face_index", 0)),
         "size": int(best["size"]),
         "bold": bool(best["bold"]),
+        "italic": bool(best["italic"]),
         "box": [fit_x, fit_y, int(text_w), int(text_h)],
         "score": round(float(best["score"]), 4),
+        "visual_loss": round(float(best["visual_loss"]), 6),
+        "prior_penalty": round(float(best["prior_penalty"]), 6),
         "target_ink": [int(tx1), int(ty1), int(tx2), int(ty2)],
         "render_ink": [int(rx1), int(ry1), int(rx2), int(ry2)],
+    }
+
+
+def measure_text_render_candidate(
+    text: str,
+    source: np.ndarray,
+    bbox: tuple[int, int, int, int],
+    *,
+    font: str,
+    size: int,
+    bold: bool,
+    pt_per_px: float,
+    font_path: str | None = None,
+    face_index: int = 0,
+) -> dict | None:
+    """Measure a fixed rendered style with a prior-free shared visual loss."""
+    if not text or "\n" in text or pt_per_px <= 0:
+        return None
+    if font_path is None:
+        candidates = _font_candidates(
+            font, cjk=True if has_cjk_text(text) else False, text=text)
+        matching = [item for item in candidates
+                    if font_families_match(font, item["ppt_name"])]
+        if not matching:
+            return None
+        font_path = matching[0]["path"]
+        face_index = int(matching[0].get("index", 0) or 0)
+    target = _target_text_metrics(source, bbox)
+    rendered = _render_text_metrics(
+        text, str(font_path), int(size), pt_per_px, bool(bold),
+        face_index=int(face_index))
+    if target is None or rendered is None:
+        return None
+    h_err = abs(rendered["ink_h"] - target["ink_h"]) / max(1, target["ink_h"])
+    w_err = abs(rendered["ink_w"] - target["ink_w"]) / max(1, target["ink_w"])
+    area_err = abs(rendered["ink_area"] - target["ink_area"]) / max(
+        1, target["ink_area"])
+    shape_err = _mask_shape_error(target["mask"], rendered["mask"])
+    visual_loss = (0.40 * h_err + 0.30 * w_err
+                   + 0.12 * min(1.5, area_err) + 0.12 * shape_err)
+    return {
+        "visual_loss": float(visual_loss),
+        "height_err": float(h_err),
+        "width_err": float(w_err),
+        "area_err": float(area_err),
+        "shape_err": float(shape_err),
+        "render_ink": rendered["ink_bbox"],
+        "target_ink": target["ink_bbox"],
+        "font_path": str(font_path),
+        "face_index": int(face_index),
     }

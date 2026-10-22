@@ -1468,6 +1468,8 @@ def classify_slide(slide: dict[str, Any],
     for idx, el in enumerate(elements):
         if (el.get("type") or "").lower() != "text":
             continue
+        if el.get("paragraphs"):
+            continue
         if not str(el.get("text") or "").strip() or not el.get("box"):
             continue
         rgb = _parse_rgb(el.get("color"))

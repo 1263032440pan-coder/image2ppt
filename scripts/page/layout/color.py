@@ -71,6 +71,18 @@ def _sampled_color_hex(pixels: np.ndarray, bg: np.ndarray) -> str:
     return _classify_text_color(r, g, b, bg)
 
 
+def _sampled_run_color_hex(pixels: np.ndarray, bg: np.ndarray) -> str:
+    """Preserve clearly brighter blue emphasis when sampling inline runs."""
+    m = np.median(pixels, axis=0).astype(int)
+    b, g, r = int(m[0]), int(m[1]), int(m[2])
+    # The deck palette classifier intentionally maps ordinary blue text to a
+    # canonical navy. Keep only a strong, high-luminance blue accent distinct;
+    # antialiased body blues and nearby samples still go through normalization.
+    if b >= 150 and b - r >= 85 and b - g >= 55:
+        return f"#{r:02X}{g:02X}{b:02X}"
+    return _classify_text_color(r, g, b, bg)
+
+
 def _normalize_run_colors(runs: list[dict], fallback_color: str,
                           bg: np.ndarray) -> None:
     """Snap anti-aliased run samples back to the line-level colour."""
@@ -85,6 +97,12 @@ def _normalize_run_colors(runs: list[dict], fallback_color: str,
             rr, gg, bb = _hex_to_rgb(raw)
         except (TypeError, ValueError):
             run["color"] = fallback_color
+            continue
+        fr, fg, fb = _hex_to_rgb(fallback_color)
+        fallback_is_blue = fb > fr + 28 and fb > fg + 18
+        raw_is_vivid_blue = bb >= 150 and bb - rr >= 85 and bb - gg >= 55
+        if fallback_is_blue and raw_is_vivid_blue:
+            run["color"] = raw
             continue
         classified = _classify_text_color(rr, gg, bb, bg)
         if classified == fallback_color or _color_close(

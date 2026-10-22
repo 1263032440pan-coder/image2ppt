@@ -34,6 +34,7 @@ except ModuleNotFoundError as exc:
 from text_safety import ppt_safe_text  # noqa: E402
 from layout.render_font import (  # noqa: E402
     default_ppt_font as _system_default_ppt_font,
+    has_cjk_text,
     resolve_ppt_font,
 )
 
@@ -47,11 +48,8 @@ from text_finalizers import (  # noqa: E402, F401
 )
 
 
-def default_ppt_font() -> str:
-    return _system_default_ppt_font()
-
-
-DEFAULT_FONT = default_ppt_font()
+def default_ppt_font(text: str = "") -> str:
+    return _system_default_ppt_font(text)
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,7 +97,7 @@ def align(value: str | None) -> PP_ALIGN:
         "center": PP_ALIGN.CENTER,
         "right": PP_ALIGN.RIGHT,
         "justify": PP_ALIGN.JUSTIFY,
-    }.get((value or "center").lower(), PP_ALIGN.CENTER)
+    }.get((value or "left").lower(), PP_ALIGN.LEFT)
 
 
 def valign(value: str | None) -> MSO_ANCHOR:
@@ -189,18 +187,22 @@ class Builder:
         self.offset_y_in = (self.slide_h_in - px_h * self.scale_in_per_px) / 2.0
 
     def set_font(self, run, spec: dict[str, Any]) -> None:
-        requested_font = spec.get("font") or spec.get("font_name") or DEFAULT_FONT
-        font = resolve_ppt_font(requested_font, text=str(run.text or ""))
-        run.font.name = font
-        # python-pptx's Font.name writes only the Latin typeface. Office uses
-        # the separate East Asian typeface for Chinese/Japanese/Korean glyphs,
-        # so leave a:ea unset and it may silently substitute a different font.
+        run_text = str(run.text or "")
+        fallback = default_ppt_font(run_text)
+        requested_font = spec.get("font") or spec.get("font_name") or fallback
+        font = resolve_ppt_font(requested_font, text=run_text)
+        fit_score = spec.get("font_fit_score")
+        matched_by_render = fit_score is not None
+        if not matched_by_render and spec.get("size_source") == "render_fit":
+            matched_by_render = True
+        if matched_by_render:
+            latin_font = east_asian_font = font
+        elif has_cjk_text(run_text):
+            latin_font, east_asian_font = "Times New Roman", "SimHei"
+        else:
+            latin_font = east_asian_font = "Times New Roman"
+        run.font.name = latin_font
         r_pr = run._r.get_or_add_rPr()
-        ea = r_pr.find(qn("a:ea"))
-        if ea is None:
-            ea = OxmlElement("a:ea")
-            r_pr.append(ea)
-        ea.set("typeface", font)
         size = int(round(float(spec.get("size", spec.get("font_size", 18)))))
         run.font.size = Pt(max(1, size))
         run.font.bold = bool(spec.get("bold", False))
@@ -221,12 +223,14 @@ class Builder:
             char_spacing = spec.get("character_spacing")
         if char_spacing is not None:
             r_pr.set("spc", str(int(round(float(char_spacing)))))
-        for tag in ("a:latin", "a:ea", "a:cs", "a:sym"):
+        for tag, typeface in (
+                ("a:latin", latin_font), ("a:ea", east_asian_font),
+                ("a:cs", latin_font), ("a:sym", latin_font)):
             face = r_pr.find(qn(tag))
             if face is None:
                 face = OxmlElement(tag)
                 r_pr.append(face)
-            face.set("typeface", font)
+            face.set("typeface", typeface)
 
     def strip_list_marker_text(self, el: dict[str, Any], text: str) -> str:
         spec = el.get("list") or {}
@@ -283,7 +287,7 @@ class Builder:
         p_pr.set("marL", str(int(self.w(body_indent_px))))
         p_pr.set("indent", str(int(self.w(marker_indent_px - body_indent_px))))
 
-        requested_font = el.get("font") or el.get("font_name") or DEFAULT_FONT
+        requested_font = el.get("font") or el.get("font_name") or default_ppt_font("•")
         font = resolve_ppt_font(requested_font, text="•")
         bu_font = OxmlElement("a:buFont")
         bu_font.set("typeface", font)
@@ -330,12 +334,32 @@ class Builder:
         tf.margin_top = self.h(margin)
         tf.margin_bottom = self.h(margin)
         tf.vertical_anchor = valign(el.get("valign"))
-        # In-bbox color variation (e.g. a red statistic embedded in a
-        # gray sentence) arrives as `runs` — a list of {text, color}
-        # dicts. Each run becomes a separate python-pptx run within the
-        # same paragraph, with the element-level font/size/bold but its
-        # own color. When `runs` is absent, the legacy single-run path
-        # is used; size and bold are always inherited from `el`.
+
+        def configure_paragraph(paragraph, paragraph_index: int) -> None:
+            paragraph_specs = el.get("paragraphs") or []
+            spec = (paragraph_specs[paragraph_index]
+                    if paragraph_index < len(paragraph_specs)
+                    and isinstance(paragraph_specs[paragraph_index], dict)
+                    else {})
+            paragraph.alignment = align(spec.get("align", el.get("align")))
+            line_spacing = spec.get("line_spacing", el.get("line_spacing"))
+            if line_spacing is not None:
+                paragraph.line_spacing = float(line_spacing)
+            if spec.get("left_indent_px") is not None:
+                paragraph.left_indent = self.w(float(spec["left_indent_px"]))
+            if spec.get("first_line_indent_px") is not None:
+                paragraph.first_line_indent = self.w(
+                    float(spec["first_line_indent_px"]))
+            if spec.get("space_before_pt") is not None:
+                paragraph.space_before = Pt(float(spec["space_before_pt"]))
+            if spec.get("space_after_pt") is not None:
+                paragraph.space_after = Pt(float(spec["space_after_pt"]))
+
+        # In-bbox style variation arrives as `runs` — a list of
+        # {text, font, color, size, bold, italic} dicts. Each run becomes a separate
+        # python-pptx run within the same paragraph and inherits unspecified
+        # properties from the element. When `runs` is absent, the legacy
+        # single-run path is used.
         runs_spec = el.get("runs")
         if runs_spec:
             runs_spec = self.strip_list_marker_runs(el, runs_spec)
@@ -353,11 +377,14 @@ class Builder:
                             "color": r.get("color"),
                             "size": r.get("size"),
                             "bold": r.get("bold"),
+                            "italic": r.get("italic"),
+                            "font": r.get("font"),
+                            "font_fit_score": r.get("font_fit_score"),
+                            "char_spacing": r.get("char_spacing"),
                         })
             for p_idx, line_runs in enumerate(paragraph_runs):
                 p = tf.paragraphs[0] if p_idx == 0 else tf.add_paragraph()
-                p.alignment = align(el.get("align"))
-                p.line_spacing = float(el.get("line_spacing", 1.05))
+                configure_paragraph(p, p_idx)
                 if p_idx == 0:
                     self.apply_paragraph_list_style(p, el, left, width)
                 if not line_runs:
@@ -378,6 +405,14 @@ class Builder:
                         run_spec["size"] = r["size"]
                     if r.get("bold") is not None:
                         run_spec["bold"] = bool(r["bold"])
+                    if r.get("italic") is not None:
+                        run_spec["italic"] = bool(r["italic"])
+                    if r.get("font"):
+                        run_spec["font"] = r["font"]
+                    if r.get("font_fit_score") is not None:
+                        run_spec["font_fit_score"] = r["font_fit_score"]
+                    if r.get("char_spacing") is not None:
+                        run_spec["char_spacing"] = r["char_spacing"]
                     self.set_font(run, run_spec)
         else:
             text = self.strip_list_marker_text(
@@ -385,8 +420,7 @@ class Builder:
             lines = text.split("\n")
             for idx, line in enumerate(lines):
                 p = tf.paragraphs[0] if idx == 0 else tf.add_paragraph()
-                p.alignment = align(el.get("align"))
-                p.line_spacing = float(el.get("line_spacing", 1.05))
+                configure_paragraph(p, idx)
                 if idx == 0:
                     self.apply_paragraph_list_style(p, el, left, width)
                 run = p.add_run()
@@ -455,7 +489,7 @@ class Builder:
                    "align": "left"|"center"|"right",
                    "valign": "top"|"middle"|"bottom"
                   }, ...]
-              "font": "Microsoft YaHei",      // default for all cells
+              "font": "optional local family; otherwise script fallback"
               "size": 14                      // default for all cells
             }
 
@@ -480,7 +514,7 @@ class Builder:
         for i, row_h in enumerate(el.get("row_heights", [])[:rows]):
             tbl.rows[i].height = self.h(float(row_h))
 
-        default_font = el.get("font", DEFAULT_FONT)
+        default_font = el.get("font") or el.get("font_name")
         default_size = float(el.get("size", 14))
         default_color = el.get("color", "#222222")
         default_align = el.get("align", "left")

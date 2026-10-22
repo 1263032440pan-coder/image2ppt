@@ -8,6 +8,7 @@ pure refactor of where the code lives.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -28,7 +29,6 @@ from text_safety import ppt_safe_text  # noqa: E402
 # facade.
 from layout.bbox_shape import _pad_icon_bbox  # noqa: E402
 from layout.bullet_images import restore_ignored_bullet_marker_images  # noqa: E402
-from layout.grouping import unify_group_sizes  # noqa: E402
 from layout.icon_alpha import (  # noqa: E402
     _ICON_PAD_ROLES,
     _SPARSE_VISUAL_ROLES,
@@ -44,6 +44,7 @@ from layout.outline import (  # noqa: E402
     _sample_outline_color,
     _split_filled_outline_rows,
 )
+from layout.paragraphs import reconstruct_paragraphs  # noqa: E402
 from layout.text_emit import _emit_text_element_record  # noqa: E402
 from layout.zorder import topo_sort_by_containment  # noqa: E402
 from layout.extraction import fit_background, validate_child_asset  # noqa: E402
@@ -598,9 +599,8 @@ class LayoutBuilder:
                 self.text_elements, self.source,
                 self.asset_dir, self.args.asset_prefix)
         )
-        # Size unification normalises font-size drift between
-        # visually-identical labels (`1000亿元` vs `24.22%`).
-        self.text_elements = unify_group_sizes(self.text_elements)
+        self.text_elements = reconstruct_paragraphs(
+            self.text_elements, self.pt_per_px)
         self.image_elements = topo_sort_by_containment(self.image_elements)
         self._finalize_composite_backplates()
         self._finalize_extractions()
@@ -848,6 +848,8 @@ class LayoutBuilder:
             encoding="utf-8")
 
         h, w = self.source.shape[:2]
+        all_elements = (self.shape_elements + self.image_elements
+                        + self.text_elements)
         layout = {
             "slide_size": {
                 "width_in": self.args.slide_width_in,
@@ -856,9 +858,7 @@ class LayoutBuilder:
             "source_width": w,
             "source_height": h,
             "background": estimate_canvas_hex(self.source),
-            "elements": (self.shape_elements
-                         + self.image_elements
-                         + self.text_elements),
+            "elements": all_elements,
             "composite_export_audit": self.composite_export_audit,
             "extraction_audit": self.extraction_audit,
         }

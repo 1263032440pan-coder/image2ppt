@@ -19,6 +19,8 @@ DeckWeaver 可以把 GPT、Gemini等输出的图片重建为可编辑的 PowerPo
 
 几乎所有的图片上的文字都会被还原成可编辑的 PPT 文本框，图标、Logo、图片和装饰元素等也会拆成独立图片对象。
 
+字体还原会扫描本机字体并通过本地渲染拟合进行匹配；没有合适候选时，中文回退到黑体，英文回退到 Times New Roman。也可扫描 `IMAGE2PPT_FONT_DIRS` 指定的本地目录。若配置目录包含 OPPO Sans 4.0，请先阅读 [第三方声明](THIRD_PARTY_NOTICES.md)；字体文件本身不随仓库分发。
+
 ## 优点
 
 - 几乎所有文字和图标都可以在 PowerPoint 里继续编辑、移动或替换。

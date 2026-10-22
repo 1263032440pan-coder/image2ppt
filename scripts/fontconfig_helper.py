@@ -17,7 +17,6 @@ _FONTCONFIG_ENV: dict[str, str] | None = None
 
 
 _FONT_FAMILY_ALIAS_GROUPS = (
-    frozenset({"alibabapuhuiti", "alibabapuhuiti20"}),
     frozenset({"notosanscjksc", "notosanssc"}),
     frozenset({"notoserifcjksc", "notoserifsc"}),
 )
@@ -25,16 +24,15 @@ _FONT_FAMILY_ALIAS_GROUPS = (
 
 def _family_key(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", str(value or ""))
-    return re.sub(r"[^a-z0-9]+", "", normalized.casefold())
+    return re.sub(r"[^a-z0-9\u3400-\u9fff]+", "", normalized.casefold())
 
 
 def font_families_match(requested: str, actual: str) -> bool:
     """Return whether two family labels name the same supported font family.
 
-    Some Windows font files expose a versioned family name (for example,
-    ``Alibaba PuHuiTi 2.0``), while the font classifier was trained with the
-    shorter name. Keep those aliases explicit so the PPTX stores a name that
-    Office can actually resolve on the conversion machine.
+    Some Windows font files expose versioned family names while the project
+    catalog may use a shorter alias. Keep supported aliases explicit so the
+    PPTX stores a name Office can resolve on the conversion machine.
     """
     a = _family_key(requested)
     b = _family_key(actual)

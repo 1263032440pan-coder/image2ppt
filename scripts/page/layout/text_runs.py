@@ -13,7 +13,7 @@ import numpy as np
 from layout.color import (
     _color_close,
     _hex_to_rgb,
-    _sampled_color_hex,
+    _sampled_run_color_hex,
 )
 
 
@@ -108,7 +108,7 @@ def _per_char_runs(bbox: list[int], text: str, orig_img: np.ndarray,
                 diff = np.abs(sub.astype(int) - bg).max(axis=2)
                 mask = diff > 35
                 if int(mask.sum()) >= 3:
-                    raw = _sampled_color_hex(sub[mask], bg)
+                    raw = _sampled_run_color_hex(sub[mask], bg)
                     col = (fallback_color
                            if _color_close(raw, fallback_color, tol=60)
                            else raw)
@@ -191,7 +191,7 @@ def _per_char_runs(bbox: list[int], text: str, orig_img: np.ndarray,
                 char_colors.append((c, None))
                 continue
             pixels = sub[mask]
-            col = _sampled_color_hex(pixels, bg)
+            col = _sampled_run_color_hex(pixels, bg)
             char_colors.append((c, col))
     else:
         # Mode B: proportional width estimation
@@ -235,7 +235,7 @@ def _per_char_runs(bbox: list[int], text: str, orig_img: np.ndarray,
                 char_colors.append((c, None))
                 continue
             pixels = sub[mask]
-            col = _sampled_color_hex(pixels, bg)
+            col = _sampled_run_color_hex(pixels, bg)
             char_colors.append((c, col))
 
     # Anchor on the line-level dominant colour: any per-char sample

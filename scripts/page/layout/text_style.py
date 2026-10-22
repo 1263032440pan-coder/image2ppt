@@ -1,10 +1,11 @@
-"""Line-level text style detection: colour, bold flag, optional runs.
+"""Line-level and mixed-run text style detection.
 
 Samples the BACKGROUND from a ring outside the OCR bbox first; pixels
 inside the bbox far from the ring colour are text strokes. Their median
-gives the text colour, the distance-transform median of the ink mask
-gives bold/regular. When `text` is supplied, also runs per-character
-sampling and emits a `runs` list if more than one colour group survives.
+gives the text colour. Font family, weight, and italic style are selected
+by local font rendering fit in the downstream layout stage. When `text`
+and character boxes are supplied, it samples per-character color so
+colored text can be emitted as editable PowerPoint runs.
 """
 from __future__ import annotations
 
@@ -25,12 +26,13 @@ def detect_text_style(bbox: list[int], orig_img: np.ndarray,
                       char_boxes: list[list[int]] | None = None,
                       words: list[str] | None = None,
                       word_boxes: list[list[int]] | None = None) -> dict:
-    """Sample text region in original image; return color + bold flag.
+    """Sample text color from the image; defer font weight to render fitting.
 
     Sample the BACKGROUND from a 4 px ring just outside the bbox first.
     Pixels INSIDE the bbox close to the bg color (within ±35 per channel)
     are considered background; the rest are text strokes. Median of the
-    text-stroke pixels gives the text color; their density gives bold.
+    text-stroke pixels gives the text color. The legacy `bold` result is
+    kept as False for layout-schema compatibility; it is not image-inferred.
 
     When `text` is provided, also runs per-character color sampling and,
     if multiple distinct color runs are detected in the bbox, returns
@@ -122,45 +124,26 @@ def detect_text_style(bbox: list[int], orig_img: np.ndarray,
     m = np.median(text_pixels, axis=0).astype(int)
     b, g, r = int(m[0]), int(m[1]), int(m[2])
     color = _classify_text_color(r, g, b, bg)
-    # Raw RGB hex of the line median: keeps the same colour SPACE as
-    # the per-char raw samples so _per_char_runs' anchor step can merge
-    # close-but-not-identical samples back to the line dominant.
-    raw_line_hex = f"#{r:02X}{g:02X}{b:02X}"
 
-    h, w = region.shape[:2]
     # ink_h: tight vertical extent of strokes inside the bbox. Used as
-    # (a) a decoration-padding probe by the caller, and (b) the
-    # denominator for stroke-width-based bold detection below.
+    # a decoration-padding probe by the caller. It does not decide font
+    # weight; bold/regular is chosen by local render fitting downstream.
     ink_h: int | None = None
     row_ink = text_mask.sum(axis=1) >= 2
     rows = np.where(row_ink)[0]
     if rows.size >= 2:
         ink_h = int(rows.max() - rows.min() + 1)
 
-    # Bold detection via absolute stroke half-width on the distance
-    # transform of the ink mask. Density misfires across font sizes;
-    # the 1.2 cutoff sits in the gap between regular (≤ 1 px median)
-    # and bold (≥ 1.5 px) strokes.
-    bold = False
-    if int(text_mask.sum()) >= 8 and ink_h and ink_h >= 4:
-        try:
-            mask_u8 = text_mask.astype(np.uint8)
-            dist = cv2.distanceTransform(mask_u8, cv2.DIST_L2, 3)
-            stroke_half_median = float(np.median(dist[text_mask]))
-            bold = stroke_half_median > 1.2
-        except cv2.error:
-            density = float(text_mask.sum()) / max(1, h * w)
-            bold = density > 0.27
-
-    result = {"color": color, "bold": bool(bold), "ink_h": ink_h}
+    result = {"color": color, "bold": False, "ink_h": ink_h}
 
     if text and len(text) >= 2:
-        runs = _per_char_runs(bbox, text, orig_img, bg, raw_line_hex,
+        runs = _per_char_runs(bbox, text, orig_img, bg, color,
                               char_boxes=char_boxes,
                               words=words, word_boxes=word_boxes)
         _normalize_run_colors(runs, color, bg)
-        if len(runs) > 1:
-            result["runs"] = runs
+        if "".join(str(run.get("text", "")) for run in runs) == text:
+            if len(runs) > 1:
+                result["runs"] = runs
     return result
 
 

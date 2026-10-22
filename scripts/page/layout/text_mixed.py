@@ -9,8 +9,6 @@ honours.
 """
 from __future__ import annotations
 
-import math
-
 import cv2
 import numpy as np
 
@@ -87,6 +85,7 @@ def _char_colors_from_runs(text: str, runs: list[dict] | None,
 def _build_runs_from_char_sizes(text: str, colors: list[str],
                                 sizes: list[int],
                                 bolds: list[bool] | None = None,
+                                fonts: list[str | None] | None = None,
                                 ) -> list[dict]:
     runs: list[dict] = []
     cur_text = ""
@@ -96,9 +95,14 @@ def _build_runs_from_char_sizes(text: str, colors: list[str],
     preserve_bold = bolds is not None and len(bolds) == len(text)
     if not preserve_bold:
         bolds = [False] * len(text)
-    for c, color, size, is_bold in zip(text, colors, sizes, bolds):
+    preserve_font = fonts is not None and len(fonts) == len(text)
+    if not preserve_font:
+        fonts = [None] * len(text)
+    cur_font: str | None = None
+    for c, color, size, is_bold, font in zip(text, colors, sizes, bolds, fonts):
         if (cur_text and color == cur_color and size == cur_size
-                and bool(is_bold) == bool(cur_bold)):
+                and bool(is_bold) == bool(cur_bold)
+                and font == cur_font):
             cur_text += c
             continue
         if cur_text:
@@ -106,16 +110,21 @@ def _build_runs_from_char_sizes(text: str, colors: list[str],
                    "size": int(cur_size)}
             if preserve_bold or cur_bold:
                 run["bold"] = bool(cur_bold)
+            if cur_font:
+                run["font"] = cur_font
             runs.append(run)
         cur_text = c
         cur_color = color
         cur_size = int(size)
         cur_bold = bool(is_bold)
+        cur_font = font
     if cur_text:
         run = {"text": cur_text, "color": cur_color,
                "size": int(cur_size)}
         if preserve_bold or cur_bold:
             run["bold"] = bool(cur_bold)
+        if cur_font:
+            run["font"] = cur_font
         runs.append(run)
     return runs
 
@@ -168,17 +177,13 @@ def mixed_size_runs_from_char_boxes(
     existing_runs: list[dict] | None,
     fallback_color: str,
     *,
-    bold: bool,
     pt_per_px: float,
 ) -> dict | None:
     """Detect common same-line mixed-size patterns and emit run sizes."""
     # Lazy imports break circular dependencies: render_ink/render_fit
     # both reach back into helpers defined here.
     from layout.render_fit import fit_text_render
-    from layout.render_ink import (
-        _sample_background_for_bbox,
-        _target_text_metrics,
-    )
+    from layout.render_ink import _sample_background_for_bbox
     from layout.render_font import default_ppt_font
 
     if not char_boxes or len(char_boxes) != len(text) or pt_per_px <= 0:
@@ -253,35 +258,9 @@ def mixed_size_runs_from_char_boxes(
     prefix_init = _initial_size(prefix_text, prefix_box, prefix_h)
     suffix_init = _initial_size(suffix_text, suffix_box, suffix_h)
 
-    def _mostly_cjk(value: str) -> bool:
-        chars = [c for c in value if c.strip() and not _is_punct_run(c)]
-        if not chars:
-            return False
-        cjk = sum(1 for c in chars if 0x4E00 <= ord(c) <= 0x9FFF)
-        return cjk >= max(2, int(math.ceil(len(chars) * 0.70)))
-
-    def _ink_density(box: tuple[int, int, int, int],
-                     glyph_h: float) -> float | None:
-        if glyph_h <= 0:
-            return None
-        metrics = _target_text_metrics(source, box)
-        if metrics is None or metrics["ink_w"] <= 0:
-            return None
-        return float(metrics["ink_area"]) / max(
-            1.0, float(metrics["ink_w"]) * float(glyph_h))
-
-    prefix_bold = bool(bold)
-    suffix_bold = bool(bold)
-    if split_kind == "label":
-        prefix_bold = _mostly_cjk(prefix_text)
-        suffix_bold = False
-    prefix_density = _ink_density(prefix_box, prefix_h)
-    if (not prefix_bold
-            and _mostly_cjk(prefix_text)
-            and prefix_h >= 10
-            and prefix_density is not None
-            and prefix_density >= 0.52):
-        prefix_bold = True
+    # Font weight comes exclusively from local raster-render comparison.
+    prefix_bold = False
+    suffix_bold = False
 
     # Look up fit_text_render via the facade so tests can patch it
     # (`itl.fit_text_render = fake_fit`).
@@ -292,14 +271,14 @@ def mixed_size_runs_from_char_boxes(
         prefix_text, source, prefix_box,
         initial_size=prefix_init,
         initial_bold=prefix_bold,
-        initial_font=default_ppt_font(),
+        initial_font=default_ppt_font(prefix_text),
         pt_per_px=pt_per_px,
     )
     suffix_fit = fit(
         suffix_text, source, suffix_box,
         initial_size=suffix_init,
         initial_bold=suffix_bold,
-        initial_font=default_ppt_font(),
+        initial_font=default_ppt_font(suffix_text),
         pt_per_px=pt_per_px,
     )
 
@@ -317,18 +296,21 @@ def mixed_size_runs_from_char_boxes(
     bolds = [prefix_bold if i < split_idx else suffix_bold
              for i in range(len(text))]
     colors = _char_colors_from_runs(text, existing_runs, fallback_color)
+    prefix_font = (prefix_fit["font"] if prefix_fit
+                   else default_ppt_font(prefix_text))
+    suffix_font = (suffix_fit["font"] if suffix_fit
+                   else default_ppt_font(suffix_text))
+    fonts = [prefix_font if i < split_idx else suffix_font
+             for i in range(len(text))]
     return {
-        "runs": _build_runs_from_char_sizes(text, colors, sizes, bolds),
+        "runs": _build_runs_from_char_sizes(
+            text, colors, sizes, bolds, fonts=fonts),
         "base_size": base_size,
         "suffix_size": suffix_size,
         "prefix_h": round(prefix_h, 2),
         "suffix_h": round(suffix_h, 2),
         "prefix_bold": bool(prefix_bold),
         "suffix_bold": bool(suffix_bold),
-        "prefix_density": (
-            round(float(prefix_density), 4)
-            if prefix_density is not None else None
-        ),
         "prefix_fit_score": (
             round(float(prefix_fit["score"]), 4) if prefix_fit else None
         ),

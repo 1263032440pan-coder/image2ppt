@@ -40,6 +40,7 @@ from inventory_to_layout import (  # noqa: E402
     _render_text_metrics,
     _sample_background_for_bbox,
     _target_text_metrics,
+    default_ppt_font,
 )
 
 # In-process render+build to skip per-iteration subprocess startup.
@@ -397,12 +398,17 @@ def _slide_pt_per_px(slide: dict[str, Any]) -> float:
 
 
 def _element_font_path(el: dict[str, Any]) -> str | None:
-    font_name = str(el.get("font") or "Microsoft YaHei")
-    style = "Bold" if el.get("bold") else "Regular"
+    text = str(el.get("text") or "")
+    font_name = str(el.get("font") or default_ppt_font(text))
+    style_parts = []
+    if el.get("bold"):
+        style_parts.append("Bold")
+    if el.get("italic"):
+        style_parts.append("Italic")
+    style = " ".join(style_parts) or "Regular"
     return (
         _fontconfig_font_path(f"{font_name}:style={style}")
         or _fontconfig_font_path(font_name)
-        or _fontconfig_font_path("Microsoft YaHei")
     )
 
 
@@ -423,19 +429,22 @@ def _local_char_render_metrics(
         return None
     pt_per_px = _slide_pt_per_px(slide)
     bold = bool(el.get("bold"))
+    italic = bool(el.get("italic"))
 
     heights: list[float] = []
     widths: list[float] = []
     for ch in chars[:80]:
         metrics = _render_text_metrics(
-            ch, font_path, int(round(size)), pt_per_px, bold)
+            ch, font_path, int(round(size)), pt_per_px, bold,
+            italic=italic)
         if not metrics:
             continue
         if metrics["ink_h"] >= 2 and metrics["ink_w"] >= 1:
             heights.append(float(metrics["ink_h"]))
             widths.append(float(metrics["ink_w"]))
     full = _render_text_metrics(
-        text, font_path, int(round(size)), pt_per_px, bold)
+        text, font_path, int(round(size)), pt_per_px, bold,
+        italic=italic)
     if not heights or not widths or not full:
         return None
     ascii_count = sum(1 for ch in chars if ord(ch) < 128)
@@ -763,6 +772,16 @@ def _apply_iteration(layout: dict[str, Any],
         for t_idx, el in enumerate(_text_elements(slide)):
             colour = colours.get((s_idx, t_idx))
             if colour is None or el.get("size") is None:
+                continue
+            if el.get("paragraphs"):
+                report.append({
+                    "slide": s_idx + 1,
+                    "iteration": iteration,
+                    "name": el.get("name"),
+                    "text": el.get("text"),
+                    "status": "skipped",
+                    "reason": "paragraph_group_requires_line_level_calibration",
+                })
                 continue
             px1, py1, px2, py2 = _box_to_preview(el["box"], scale, ox, oy)
             box_w = max(1, px2 - px1)

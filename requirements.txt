@@ -1,5 +1,6 @@
 python-pptx
 pillow
+fonttools>=4.50
 numpy
 opencv-python
 paddleocr>=3

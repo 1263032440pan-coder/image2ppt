@@ -350,7 +350,6 @@ def _style_table_cells(cells: list[dict], rows: int, cols: int) -> list[dict]:
         is_header = r == 0
         is_total = r == rows - 1
         is_numeric = col > 0 and any(ch.isdigit() for ch in text)
-        out.setdefault("font", "Microsoft YaHei")
         out["valign"] = "middle"
         out["margin"] = 1.0
         if is_header or (is_total and col == 0):
@@ -637,7 +636,6 @@ def _detect_tables_for_page(num: str, src_path: Path, ocr: list[dict],
             "col_widths": col_widths,
             "row_heights": row_heights,
             "cells": cells,
-            "font": "Microsoft YaHei",
             "size": 9,
             "align": "left",
             "valign": "middle",
@@ -927,6 +925,7 @@ def process_page_simple(num: str, src_dir: Path, work: Path) -> dict:
         clean_rel_path=clean_rel,
         ocr_path=ocr_path,
         out_layout_path=layout_path,
+        source_image=src_img,
     )
 
 
