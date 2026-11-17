@@ -1,0 +1,26 @@
+name: Tests
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      OMP_NUM_THREADS: '1'
+      OPENBLAS_NUM_THREADS: '1'
+      MKL_NUM_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m playwright install --with-deps chromium
+      # Each heavy visual test module runs in a fresh interpreter.
+      - run: python -m pytest -q tests/test_sharpness_v05.py
+      - run: python -m pytest -q tests/test_color_detail_v04.py
+      - run: python -m pytest -q tests/test_geometry.py
+      - run: python -m pytest -q tests/test_graphics.py
+      - run: python -m pytest -q tests/test_model.py tests/test_schema.py
+      - run: python -m pytest -q tests/test_pipeline.py
+      - run: python -m pytest -q tests/test_real_flow_mock.py

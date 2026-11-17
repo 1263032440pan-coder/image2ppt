@@ -1,0 +1,431 @@
+{
+  "version": "0.1",
+  "background": "#E8DBB7",
+  "canvas": {
+    "width": 1000,
+    "height": 1000
+  },
+  "objects": [
+    {
+      "id": "sun",
+      "type": "sun",
+      "bbox": [
+        699,
+        105,
+        150,
+        145
+      ],
+      "layer": 1,
+      "fill": "#DC5E40"
+    },
+    {
+      "id": "mountain_west",
+      "type": "mountain",
+      "bbox": [
+        421,
+        175,
+        423,
+        165
+      ],
+      "layer": 2,
+      "fill": "#668F85"
+    },
+    {
+      "id": "mountain_east",
+      "type": "mountain",
+      "bbox": [
+        733,
+        197,
+        248,
+        145
+      ],
+      "layer": 3,
+      "fill": "#567A77"
+    },
+    {
+      "id": "house",
+      "type": "house",
+      "bbox": [
+        90,
+        80,
+        302,
+        250
+      ],
+      "layer": 4,
+      "fill": "#C6BFA8"
+    },
+    {
+      "id": "pine_left",
+      "type": "pine",
+      "bbox": [
+        5,
+        10,
+        250,
+        348
+      ],
+      "layer": 5,
+      "fill": "#3D6659",
+      "params": {
+        "seed": 21
+      }
+    },
+    {
+      "id": "pine_center",
+      "type": "pine",
+      "bbox": [
+        250,
+        22,
+        255,
+        280
+      ],
+      "layer": 5,
+      "fill": "#3D6659",
+      "params": {
+        "seed": 38
+      }
+    },
+    {
+      "id": "pine_right",
+      "type": "pine",
+      "bbox": [
+        795,
+        44,
+        205,
+        335
+      ],
+      "layer": 5,
+      "fill": "#3D6659",
+      "params": {
+        "seed": 56
+      }
+    },
+    {
+      "id": "pond",
+      "type": "pond",
+      "bbox": [
+        15,
+        320,
+        970,
+        660
+      ],
+      "layer": 6,
+      "fill": "#ADBEAF"
+    },
+    {
+      "id": "rocks_left",
+      "type": "rock",
+      "bbox": [
+        16,
+        338,
+        315,
+        146
+      ],
+      "layer": 7,
+      "fill": "#718B7B"
+    },
+    {
+      "id": "bridge",
+      "type": "bridge",
+      "bbox": [
+        560,
+        274,
+        347,
+        136
+      ],
+      "layer": 8,
+      "fill": "#C8503C",
+      "params": {
+        "arch": 0.33
+      }
+    },
+    {
+      "id": "lily1",
+      "type": "lily_pad",
+      "bbox": [
+        109,
+        523,
+        104,
+        48
+      ],
+      "layer": 9,
+      "fill": "#638B6E"
+    },
+    {
+      "id": "lily2",
+      "type": "lily_pad",
+      "bbox": [
+        340,
+        476,
+        89,
+        39
+      ],
+      "layer": 9,
+      "fill": "#648A71"
+    },
+    {
+      "id": "lily3",
+      "type": "lily_pad",
+      "bbox": [
+        472,
+        456,
+        112,
+        39
+      ],
+      "layer": 9,
+      "fill": "#638A70"
+    },
+    {
+      "id": "lily4",
+      "type": "lily_pad",
+      "bbox": [
+        720,
+        525,
+        103,
+        39
+      ],
+      "layer": 9,
+      "fill": "#648D75"
+    },
+    {
+      "id": "lily5",
+      "type": "lily_pad",
+      "bbox": [
+        813,
+        588,
+        127,
+        58
+      ],
+      "layer": 9,
+      "fill": "#648D75"
+    },
+    {
+      "id": "reed_right",
+      "type": "reed",
+      "bbox": [
+        858,
+        401,
+        140,
+        190
+      ],
+      "layer": 10,
+      "fill": "#517A65",
+      "params": {
+        "density": 17,
+        "seed": 16
+      }
+    },
+    {
+      "id": "reed_left",
+      "type": "reed",
+      "bbox": [
+        15,
+        473,
+        179,
+        333
+      ],
+      "layer": 10,
+      "fill": "#517A65",
+      "params": {
+        "density": 20,
+        "seed": 25
+      }
+    },
+    {
+      "id": "ripple1",
+      "type": "ripple",
+      "bbox": [
+        255,
+        635,
+        450,
+        125
+      ],
+      "layer": 11,
+      "fill": "#4B686B"
+    },
+    {
+      "id": "koi_gold",
+      "type": "koi",
+      "bbox": [
+        243,
+        513,
+        290,
+        286
+      ],
+      "layer": 13,
+      "fill": "#E9D3A0",
+      "params": {
+        "rotation": -25,
+        "pattern": "gold",
+        "facing": "left"
+      },
+      "geometry_hint": {
+        "mode": "trace",
+        "foreground_points": [
+          [
+            380,
+            700
+          ],
+          [
+            340,
+            677
+          ],
+          [
+            420,
+            733
+          ],
+          [
+            275,
+            620
+          ]
+        ],
+        "background_points": [
+          [
+            540,
+            630
+          ],
+          [
+            600,
+            615
+          ],
+          [
+            650,
+            630
+          ]
+        ]
+      }
+    },
+    {
+      "id": "koi_black",
+      "type": "koi",
+      "bbox": [
+        352,
+        546,
+        393,
+        163
+      ],
+      "layer": 12,
+      "fill": "#33332F",
+      "params": {
+        "pattern": "black",
+        "facing": "left",
+        "rotation": -5
+      },
+      "geometry_hint": {
+        "mode": "trace",
+        "foreground_points": [
+          [
+            540,
+            634
+          ],
+          [
+            600,
+            630
+          ],
+          [
+            470,
+            620
+          ],
+          [
+            697,
+            627
+          ]
+        ],
+        "background_points": [
+          [
+            400,
+            720
+          ],
+          [
+            490,
+            763
+          ]
+        ]
+      }
+    },
+    {
+      "id": "koi_red",
+      "type": "koi",
+      "bbox": [
+        512,
+        644,
+        435,
+        241
+      ],
+      "layer": 14,
+      "fill": "#CB603E",
+      "params": {
+        "pattern": "red_white",
+        "facing": "left",
+        "rotation": -14
+      },
+      "geometry_hint": {
+        "mode": "trace",
+        "foreground_points": [
+          [
+            705,
+            750
+          ],
+          [
+            600,
+            780
+          ],
+          [
+            830,
+            735
+          ],
+          [
+            916,
+            700
+          ]
+        ]
+      }
+    },
+    {
+      "id": "lotus",
+      "type": "lotus",
+      "bbox": [
+        148,
+        819,
+        185,
+        139
+      ],
+      "layer": 15,
+      "fill": "#F0CBB5",
+      "geometry_hint": {
+        "mode": "trace",
+        "foreground_points": [
+          [
+            230,
+            896
+          ],
+          [
+            230,
+            858
+          ]
+        ],
+        "background_points": [
+          [
+            163,
+            900
+          ],
+          [
+            300,
+            839
+          ]
+        ]
+      }
+    },
+    {
+      "id": "pad_front",
+      "type": "lily_pad",
+      "bbox": [
+        285,
+        905,
+        152,
+        72
+      ],
+      "layer": 16,
+      "fill": "#4E775F"
+    }
+  ]
+}
